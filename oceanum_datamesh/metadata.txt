@@ -1,0 +1,23 @@
+[general]
+name=Oceanum Datamesh
+qgisMinimumVersion=3.22
+qgisMaximumVersion=4.99
+description=Search, query, load and display Oceanum Datamesh ocean & environmental data directly in QGIS.
+about=A QGIS plugin for the Oceanum Datamesh platform. Search the Datamesh catalog, inspect dataset
+    metadata, then query and load data into QGIS as native layers: gridded datasets become raster layers,
+    feature datasets become vector layers, and station/table data become point or attribute-table layers.
+    Requires a Datamesh access token (set the DATAMESH_TOKEN environment variable or enter it in the plugin).
+    Depends on the `oceanum` Python package, which the plugin can install for you on first run.
+version=0.1.0
+author=Oceanum / Dave Johnson
+email=d.johnson@oceanum.science
+tracker=https://github.com/oceanum-io/oceanum-qgis/issues
+repository=https://github.com/oceanum-io/oceanum-qgis
+homepage=https://github.com/oceanum-io/oceanum-qgis
+tags=oceanography,ocean,metocean,datamesh,oceanum,netcdf,raster,vector,web,data,api,wave,wind,environmental
+category=Web
+icon=resources/icon.svg
+experimental=True
+deprecated=False
+supportsQt6=True
+hasProcessingProvider=no

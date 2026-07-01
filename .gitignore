@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+*.zip
+# QGIS compiled resources (we load resources from files, but ignore if generated)
+oceanum_datamesh/resources_rc.py
+# Local editor / OS cruft
+.vscode/
+.idea/
+.DS_Store

@@ -1,0 +1,36 @@
+# Dev tooling only. The plugin itself is not pip-installed: it is deployed as a
+# folder into the QGIS profile plugins directory (see the Makefile). Its runtime
+# dependency, `oceanum`, is installed into the QGIS Python interpreter.
+[project]
+name = "oceanum-qgis"
+version = "0.1.0"
+description = "QGIS plugin to search, query, load and display Oceanum Datamesh data"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Dave Johnson", email = "d.johnson@oceanum.science" }]
+dependencies = ["oceanum>=1.1"]
+
+[project.optional-dependencies]
+dev = ["ruff", "pytest"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "N"]
+ignore = [
+    "N802",   # QGIS API mandates method names like initGui
+    "B008",   # Qt default arguments
+    "UP006",  # keep typing compatible with older QGIS Pythons
+    "UP007",
+    "UP035",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
