@@ -10,6 +10,7 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QDockWidget
 
+from . import browser
 from .gui.dock import DatameshPanel
 
 PLUGIN_NAME = "Oceanum Datamesh"
@@ -23,6 +24,7 @@ class OceanumDatameshPlugin:
         self.iface = iface
         self.action: QAction | None = None
         self.dock: QDockWidget | None = None
+        self.browser_provider = None
 
     # -- QGIS lifecycle ---------------------------------------------------- #
     def initGui(self) -> None:  # noqa: N802 (QGIS API)
@@ -42,7 +44,13 @@ class OceanumDatameshPlugin:
         self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock)
         self.dock.hide()
 
+        # Add "Oceanum Datamesh" to the Browser panel (top-left sources tree).
+        self.browser_provider = browser.register(self.open_datasource_in_panel)
+
     def unload(self) -> None:
+        if self.browser_provider is not None:
+            browser.unregister(self.browser_provider)
+            self.browser_provider = None
         if self.action is not None:
             self.iface.removePluginWebMenu(PLUGIN_NAME, self.action)
             self.iface.removeToolBarIcon(self.action)
@@ -60,3 +68,11 @@ class OceanumDatameshPlugin:
     def _on_visibility_changed(self, visible: bool) -> None:
         if self.action is not None:
             self.action.setChecked(visible)
+
+    def open_datasource_in_panel(self, datasource_id: str) -> None:
+        """Show the dock and load a datasource into it (from a Browser item)."""
+        if self.dock is None:
+            return
+        self.dock.setVisible(True)
+        self.dock.raise_()
+        self.dock.widget().show_datasource(datasource_id)

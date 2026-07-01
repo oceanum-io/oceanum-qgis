@@ -84,6 +84,14 @@ export DATAMESH_USER=...        # optional
 Queries run on a background thread (`QgsTask`) so QGIS stays responsive; layers
 are added when the download finishes.
 
+### From the Browser panel
+
+The plugin also adds an **Oceanum Datamesh** entry to the QGIS **Browser** panel
+(top-left Sources tree). Expand it to browse a sample of the catalogue, or
+right-click it and choose **Set catalog filter…** to search (e.g. "wave"),
+then double-click a dataset to open the panel with it selected, ready to filter
+and load.
+
 ### Query size
 
 Datamesh streams very large requests lazily rather than as a direct download.

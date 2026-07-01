@@ -292,7 +292,14 @@ class DatameshPanel(QWidget):
     def _on_result_selected(self, current, _previous=None) -> None:
         if current is None or not self.engine:
             return
-        datasource_id = current.data(Qt.ItemDataRole.UserRole)
+        self._load_datasource(current.data(Qt.ItemDataRole.UserRole))
+
+    def show_datasource(self, datasource_id: str) -> None:
+        """Load a datasource into the filter section (used by the Browser panel)."""
+        if self.engine:
+            self._load_datasource(datasource_id)
+
+    def _load_datasource(self, datasource_id: str) -> None:
         self.meta_view.setHtml("<i>Loading metadata…</i>")
         self.load_btn.setEnabled(False)
 
