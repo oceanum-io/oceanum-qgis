@@ -36,26 +36,6 @@ def _iso(value) -> Optional[str]:
 # ``x`` easting, ``y`` northing, ``g`` an abstract feature geometry.
 _AXIS_X, _AXIS_Y, _AXIS_GEOM = "x", "y", "g"
 
-# Query fields we forward from a plain spec dict; anything else is dropped so the
-# oceanum ``Query`` model does not warn about unknown parameters.
-_QUERY_FIELDS = frozenset(
-    {
-        "datasource",
-        "parameters",
-        "description",
-        "variables",
-        "timefilter",
-        "geofilter",
-        "levelfilter",
-        "coordfilter",
-        "crs",
-        "aggregate",
-        "functions",
-        "limit",
-        "id",
-    }
-)
-
 
 def map_compatibility(coordkeys) -> tuple[bool, str]:
     """Decide whether a staged query can be shown on the QGIS map.
@@ -137,16 +117,20 @@ class DatameshEngine:
     # -- catalog search ---------------------------------------------------- #
     @staticmethod
     def _as_geofilter(geofilter):
-        """Coerce a plain geofilter dict into an OceanQL ``GeoFilter`` model.
+        """Coerce a GeoFilter *spec* dict into an OceanQL ``GeoFilter`` model.
 
-        ``get_catalog`` interprets a raw dict as a GeoJSON *geometry*, so a
-        ``{"type": "bbox", ...}`` spec dict must be validated into the GeoFilter
-        model first or it fails with "Unknown geometry type bbox".
+        ``get_catalog`` reads a raw dict as a GeoJSON *geometry*, so a GeoFilter
+        spec like ``{"type": "bbox", ...}`` fails with "Unknown geometry type
+        bbox" unless validated into the model first. Only dicts whose ``type``
+        is a GeoFilter type are coerced; a plain GeoJSON geometry dict (a valid
+        ``get_catalog`` input) is passed through untouched.
         """
         if not isinstance(geofilter, dict):
             return geofilter
-        from oceanum.datamesh.query import GeoFilter
+        from oceanum.datamesh.query import GeoFilter, GeoFilterType
 
+        if geofilter.get("type") not in {t.value for t in GeoFilterType}:
+            return geofilter
         return GeoFilter(**geofilter)
 
     def search(self, text=None, geofilter=None, timefilter=None, limit=200) -> list[dict]:
@@ -193,9 +177,10 @@ class DatameshEngine:
 
         if isinstance(spec, Query):
             return spec
-        fields = {
-            k: v for k, v in dict(spec).items() if k in _QUERY_FIELDS and v not in (None, [], {})
-        }
+        # Filter to the model's own field names (source of truth), so a field
+        # added in a future oceanum release is not silently dropped here.
+        allowed = set(Query.model_fields)
+        fields = {k: v for k, v in dict(spec).items() if k in allowed and v not in (None, [], {})}
         return Query(**fields)
 
     def stage(self, spec):
@@ -233,6 +218,21 @@ class DatameshEngine:
         compatible, reason = map_compatibility(getattr(stage, "coordkeys", None))
         return stage, compatible, reason
 
+    def _guard_query_size(self, query) -> None:
+        """Reject an oversized query up front using the stage size (no download).
+
+        Structural counterpart to the exception/warning text matching below: the
+        stage endpoint reports the exact result size before any data is fetched.
+        If staging is unavailable we fall back to that post-download guard.
+        """
+        try:
+            stage = self.stage(query)
+        except DatameshError:
+            return
+        size = getattr(stage, "size", 0) if stage is not None else 0
+        if size and size > _MAX_RESULT_BYTES:
+            raise DatameshError(f"{_TOO_LARGE_MSG} (about {size / 1e9:.1f} GB).")
+
     # -- query ------------------------------------------------------------- #
     def query(self, spec):
         """Run a query and return the raw container.
@@ -250,6 +250,7 @@ class DatameshEngine:
         except ImportError:  # pragma: no cover - handled by connect()
             query_cls = None
         if query_cls is not None and isinstance(spec, query_cls):
+            self._guard_query_size(spec)
             kwargs = {"query": spec}
         else:
             kwargs = {"datasource": spec["datasource"]}

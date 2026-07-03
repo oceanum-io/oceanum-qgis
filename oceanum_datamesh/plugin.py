@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-import os
+from pathlib import Path
 
 from qgis.core import QgsApplication
 from qgis.PyQt.QtWidgets import QAction
@@ -71,4 +71,4 @@ class OceanumDatameshPlugin:
 def _connections_path() -> str:
     """Per-profile workspace file that stores the Datamesh connections."""
     profile = QgsApplication.qgisSettingsDirPath()
-    return os.path.join(profile, "oceanum_datamesh", "connections.json")
+    return str(Path(profile) / "oceanum_datamesh" / "connections.json")

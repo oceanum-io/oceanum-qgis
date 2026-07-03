@@ -16,9 +16,9 @@ import json
 
 from qgis.core import (
     Qgis,
-    QgsApplication,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
+    QgsFileUtils,
     QgsGeometry,
     QgsProject,
     QgsVectorLayer,
@@ -47,8 +47,8 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from ..tasks import FunctionTask
-from ..utils import canvas_bbox_4326
+from ..tasks import FunctionTask, push_message, run_task
+from ..utils import canvas_bbox_4326, to_utc_qdatetime
 
 
 class ConnectionDialog(QDialog):
@@ -62,7 +62,8 @@ class ConnectionDialog(QDialog):
         self._datasource_id = None
         self._summary = None
         self._staged_ok = False
-        self._saved_geofilter = None  # preserved geofilter (edit / feature capture)
+        self._saved_geofilter = None  # geofilter loaded from an edited connection
+        self._feature_geofilter = None  # geofilter captured from a map selection
         self._auto_name = None  # name auto-filled from the datasource, if any
         self._result_label = None
         self._result_query = None
@@ -233,7 +234,7 @@ class ConnectionDialog(QDialog):
             geofilter = {"type": "bbox", "geom": canvas_bbox_4326(self.iface)}
         self.results_list.clear()
         self.search_btn.setEnabled(False)
-        self._start_progress("Searching catalog…")
+        self._start_progress()
 
         def work(_task):
             return self.engine.search(text=text, geofilter=geofilter, limit=200)
@@ -278,6 +279,14 @@ class ConnectionDialog(QDialog):
         self._datasource_id = summary.get("id")
         self.meta_view.setHtml(_format_metadata(summary))
 
+        # Geofilters belong to the previous datasource — clear them and drop any
+        # "Saved geometry filter" entry so a stale geometry can't leak across.
+        self._saved_geofilter = None
+        self._feature_geofilter = None
+        saved_index = self.area_combo.findData("saved")
+        if saved_index >= 0:
+            self.area_combo.removeItem(saved_index)
+
         # Default the connection name to the datasource name, unless the user
         # has typed one themselves (an earlier auto-fill may be replaced).
         current_name = self.name_edit.text().strip()
@@ -310,8 +319,8 @@ class ConnectionDialog(QDialog):
         times = list(getattr(tf, "times", None) or []) if tf else []
         if len(times) == 2 and times[0] and times[1]:
             self.all_time_cb.setChecked(False)
-            self.start_edit.setDateTime(_qdt(times[0]))
-            self.end_edit.setDateTime(_qdt(times[1]))
+            self.start_edit.setDateTime(to_utc_qdatetime(times[0]))
+            self.end_edit.setDateTime(to_utc_qdatetime(times[1]))
         else:
             self.all_time_cb.setChecked(True)
 
@@ -323,14 +332,15 @@ class ConnectionDialog(QDialog):
                 self._select_area("manual")
                 for key, value in zip(("xmin", "ymin", "xmax", "ymax"), geom):
                     self.bbox_spins[key].setValue(float(value))
-            else:  # a feature geofilter — preserve it verbatim
+            else:  # a feature geofilter — preserve it verbatim in its own slot
                 self._saved_geofilter = geo
-                self.area_combo.insertItem(0, "Saved geometry filter", "saved")
+                if self.area_combo.findData("saved") < 0:
+                    self.area_combo.insertItem(0, "Saved geometry filter", "saved")
                 self._select_area("saved")
 
     def _init_time_range(self, summary: dict) -> None:
-        start = _parse_iso(summary.get("tstart"))
-        end = _parse_iso(summary.get("tend"))
+        start = _time_or_none(summary.get("tstart"))
+        end = _time_or_none(summary.get("tend"))
         if start is None and end is None:
             self.all_time_cb.setChecked(True)
             return
@@ -374,7 +384,7 @@ class ConnectionDialog(QDialog):
             QMessageBox.warning(self, "Selected feature", str(exc))
             self._select_area("full")
             return
-        self._saved_geofilter = geofilter
+        self._feature_geofilter = geofilter
         self.area_hint.setText(f"Using {note} as the geofilter.")
         self.area_hint.setVisible(True)
 
@@ -382,8 +392,10 @@ class ConnectionDialog(QDialog):
         key = self.area_combo.currentData()
         if key in ("full", None):
             return None
-        if key in ("saved", "feature"):
+        if key == "saved":
             return self._saved_geofilter
+        if key == "feature":
+            return self._feature_geofilter
         if key == "canvas":
             return {"type": "bbox", "geom": canvas_bbox_4326(self.iface)}
         if key == "manual":
@@ -409,9 +421,10 @@ class ConnectionDialog(QDialog):
         if variables:
             spec["variables"] = variables
         if not self.all_time_cb.isChecked():
-            start = self.start_edit.dateTime().toUTC().toString(Qt.DateFormat.ISODate)
-            end = self.end_edit.dateTime().toUTC().toString(Qt.DateFormat.ISODate)
-            spec["timefilter"] = {"type": "range", "times": [start, end]}
+            spec["timefilter"] = {
+                "type": "range",
+                "times": [_edit_utc_iso(self.start_edit), _edit_utc_iso(self.end_edit)],
+            }
         geofilter = self._current_geofilter()
         if geofilter:
             spec["geofilter"] = geofilter
@@ -423,7 +436,7 @@ class ConnectionDialog(QDialog):
             return
         self.stage_btn.setEnabled(False)
         self._set_verdict("Staging…", "info")
-        self._start_progress("Staging query…")
+        self._start_progress()
 
         def work(_task):
             return self.engine.stage_compatibility(spec)
@@ -492,27 +505,17 @@ class ConnectionDialog(QDialog):
         self.verdict_label.setText(f'<span style="color:{colour}">{html.escape(text)}</span>')
 
     def _run_task(self, description, work, done) -> None:
-        task = FunctionTask(description, work, done)
-        self._tasks.append(task)
+        run_task(description, work, done, self._tasks)
 
-        def cleanup(*_):
-            if task in self._tasks:
-                self._tasks.remove(task)
-
-        task.taskCompleted.connect(cleanup)
-        task.taskTerminated.connect(cleanup)
-        QgsApplication.taskManager().addTask(task)
-
-    def _start_progress(self, message: str) -> None:
-        self.progress.setRange(0, 0)
+    def _start_progress(self) -> None:
+        self.progress.setRange(0, 0)  # indeterminate (busy) bar
         self.progress.setVisible(True)
 
     def _end_progress(self) -> None:
         self.progress.setVisible(False)
 
     def _warn(self, text: str) -> None:
-        if self.iface is not None:
-            self.iface.messageBar().pushMessage("Oceanum Datamesh", text, level=Qgis.Warning)
+        push_message(self.iface, text, Qgis.Warning)
 
 
 # --------------------------------------------------------------------------- #
@@ -533,8 +536,9 @@ def selected_feature_geofilter(iface):
         raise ValueError("No features selected. Select a point, multipoint or a single polygon.")
     geoms = [f.geometry() for f in feats]
     gtype = geoms[0].type()
+    point_type, polygon_type = _geometry_types()
 
-    if gtype == Qgis.GeometryType.Point:
+    if gtype == point_type:
         points = []
         for geom in geoms:
             points.extend(geom.asMultiPoint() if geom.isMultipart() else [geom.asPoint()])
@@ -544,7 +548,7 @@ def selected_feature_geofilter(iface):
             else QgsGeometry.fromPointXY(points[0])
         )
         note = f"MultiPoint ({len(points)} points)" if len(points) > 1 else "Point"
-    elif gtype == Qgis.GeometryType.Polygon:
+    elif gtype == polygon_type:
         if len(geoms) != 1:
             raise ValueError("Select a single polygon — multiple polygons are not supported.")
         combined = geoms[0]
@@ -571,37 +575,47 @@ def selected_feature_geofilter(iface):
     return {"type": "feature", "geom": feature}, note
 
 
+def _geometry_types():
+    """(point, polygon) geometry-type enums, tolerant of QGIS < 3.30.
+
+    ``Qgis.GeometryType`` exists from 3.30; earlier releases use
+    ``QgsWkbTypes.GeometryType``.
+    """
+    try:
+        return Qgis.GeometryType.Point, Qgis.GeometryType.Polygon
+    except AttributeError:  # pragma: no cover - only on QGIS < 3.30
+        from qgis.core import QgsWkbTypes
+
+        return QgsWkbTypes.PointGeometry, QgsWkbTypes.PolygonGeometry
+
+
 def _verdict_text(stage, compatible: bool, reason: str) -> str:
     if not compatible:
         return f"✗ Not map-compatible: {reason}"
     container = getattr(getattr(stage, "container", None), "value", None) or "data"
-    size = _human_size(getattr(stage, "size", None))
+    nbytes = getattr(stage, "size", None)
+    size = QgsFileUtils.representFileSize(int(nbytes)) if nbytes else "unknown size"
     kind = "grid → raster" if reason == "x/y" and container == "dataset" else container
     return f"✓ Compatible ({kind}) — about {size}. Ready to save."
 
 
-def _human_size(nbytes) -> str:
-    if not nbytes:
-        return "unknown size"
-    value = float(nbytes)
-    for unit in ("B", "kB", "MB", "GB", "TB"):
-        if value < 1024 or unit == "TB":
-            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
-        value /= 1024
-    return f"{value:.1f} TB"
-
-
-def _qdt(value) -> QDateTime:
-    """Convert a python datetime (naive UTC) to a QDateTime."""
-    text = value.strftime("%Y-%m-%dT%H:%M:%S") if hasattr(value, "strftime") else str(value)
-    return QDateTime.fromString(text, Qt.DateFormat.ISODate)
-
-
-def _parse_iso(value):
+def _time_or_none(value):
+    """Parse a datasource time hint into a UTC QDateTime, or None if absent."""
     if not value:
         return None
-    dt = QDateTime.fromString(str(value), Qt.DateFormat.ISODate)
+    dt = to_utc_qdatetime(value)
     return dt if dt.isValid() else None
+
+
+def _edit_utc_iso(edit) -> str:
+    """Read a QDateTimeEdit's wall-clock as UTC (the edits display UTC times).
+
+    Reinterprets the displayed value as UTC rather than converting from local,
+    so the saved window matches what the user sees regardless of machine zone.
+    """
+    dt = edit.dateTime()
+    dt.setTimeSpec(Qt.TimeSpec.UTC)
+    return dt.toString(Qt.DateFormat.ISODate)
 
 
 def _format_metadata(summary: dict) -> str:

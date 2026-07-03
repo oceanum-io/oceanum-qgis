@@ -40,51 +40,71 @@ class _Context:
 
 
 _CONTEXT = _Context()
-_ROOT_ITEM = None
+_ROOT_ITEMS: list = []  # one live root item per Browser panel
 _TASKS: list = []
+_ENGINE: DatameshEngine | None = None
 
 
 def set_context(iface, store) -> None:
     _CONTEXT.iface = iface
     _CONTEXT.store = store
+    _invalidate_engine()
 
 
 def _main_window():
     return _CONTEXT.iface.mainWindow() if _CONTEXT.iface is not None else None
 
 
+def _invalidate_engine() -> None:
+    """Drop the cached engine so the next call rebuilds with current settings."""
+    global _ENGINE
+    _ENGINE = None
+
+
 def _engine() -> DatameshEngine:
-    settings = load_connection_settings()
-    return DatameshEngine(
-        token=settings["token"] or None,
-        service=settings["service"] or None,
-        user=settings["user"] or None,
-    )
+    """Return a cached engine, rebuilt after settings change.
+
+    Constructing a ``DatameshEngine`` connector performs a metadata request, so
+    we reuse one instance across Browser expands and actions rather than paying
+    that handshake on every call.
+    """
+    global _ENGINE
+    if _ENGINE is None:
+        settings = load_connection_settings()
+        _ENGINE = DatameshEngine(
+            token=settings["token"] or None,
+            service=settings["service"] or None,
+            user=settings["user"] or None,
+        )
+    return _ENGINE
 
 
 def _message(text: str, level=Qgis.Info) -> None:
-    if _CONTEXT.iface is not None:
-        _CONTEXT.iface.messageBar().pushMessage("Oceanum Datamesh", text, level=level)
+    from . import tasks
+
+    tasks.push_message(_CONTEXT.iface, text, level)
+
+
+def _register_root(item) -> None:
+    _ROOT_ITEMS.append(item)
 
 
 def _refresh_root() -> None:
-    if _ROOT_ITEM is not None:
-        _ROOT_ITEM.refresh()
+    """Refresh every live root item, pruning any whose C++ object was deleted."""
+    survivors = []
+    for item in _ROOT_ITEMS:
+        try:
+            item.refresh()
+            survivors.append(item)
+        except RuntimeError:  # underlying item already destroyed by QGIS
+            pass
+    _ROOT_ITEMS[:] = survivors
 
 
 def _run_task(description, work, done) -> None:
-    from .tasks import FunctionTask
+    from . import tasks
 
-    task = FunctionTask(description, work, done)
-    _TASKS.append(task)
-
-    def cleanup(*_):
-        if task in _TASKS:
-            _TASKS.remove(task)
-
-    task.taskCompleted.connect(cleanup)
-    task.taskTerminated.connect(cleanup)
-    QgsApplication.taskManager().addTask(task)
+    tasks.run_task(description, work, done, _TASKS)
 
 
 # --------------------------------------------------------------------------- #
@@ -94,8 +114,37 @@ def open_settings(parent=None) -> bool:
     dialog = SettingsDialog(parent or _main_window())
     accepted = bool(dialog.exec())
     if accepted:
+        _invalidate_engine()  # token/service/user may have changed
         _refresh_root()
     return accepted
+
+
+def install_dependency(parent=None) -> None:
+    """Install the 'oceanum' package into the QGIS Python (background task)."""
+    from .dependencies import install_oceanum
+
+    _message("Installing the 'oceanum' package…", Qgis.Info)
+
+    def work(_task):
+        return install_oceanum()
+
+    def done(ok, result, error):
+        if not ok or not result or not result[0]:
+            from .tasks import log
+
+            detail = str(error) if error else (result[1] if result else "")
+            log(detail, Qgis.Warning)
+            _message(
+                "Could not install 'oceanum'. Install it manually: pip install oceanum "
+                "(see the Log Messages panel).",
+                Qgis.Critical,
+            )
+            return
+        _invalidate_engine()
+        _refresh_root()
+        _message("Installed 'oceanum'. The Datamesh node is ready.", Qgis.Success)
+
+    _run_task("Install oceanum", work, done)
 
 
 def _ensure_ready(engine, parent) -> bool:
@@ -167,6 +216,20 @@ def delete_connection(connection, parent=None) -> None:
         _refresh_root()
 
 
+def _coordinates_for(engine, datasource_id) -> dict:
+    """The datasource's Datamesh coordinate map (x/y/t/b keys), or ``{}``.
+
+    This is the converters' primary hint for datasources whose coordinate
+    variables have non-standard names; without it, loading falls back to name
+    heuristics and can fail on datasources the stage check declared compatible.
+    Metadata errors degrade to an empty map.
+    """
+    try:
+        return engine.datasource_summary(datasource_id).get("coordinates") or {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def load_connection(connection) -> None:
     """Run a saved connection's query and add the resulting layer(s) to the map."""
     engine = _engine()
@@ -184,7 +247,11 @@ def load_connection(connection) -> None:
         from . import layers
 
         return layers.query_to_layer_specs(
-            engine, connection.query, name, coordinates={}, variables=variables or None
+            engine,
+            connection.query,
+            name,
+            coordinates=_coordinates_for(engine, connection.datasource),
+            variables=variables or None,
         )
 
     def done(ok, result, error):
@@ -263,24 +330,35 @@ class DatameshRootItem(QgsDataCollectionItem):
 
     def createChildren(self) -> list:
         if not oceanum_available():
-            return [DatameshMessageItem(self, "Install the 'oceanum' package (Datamesh settings…)")]
+            return [
+                DatameshMessageItem(self, "Install the 'oceanum' package — right-click → Install…")
+            ]
         if _CONTEXT.store is None:
             return [DatameshMessageItem(self, "Datamesh is still initialising…")]
         if not _engine().has_token:
             return [DatameshMessageItem(self, "Set a token — right-click → Datamesh settings…")]
-        connections = _CONTEXT.store.list()
+        try:
+            connections = _CONTEXT.store.list()
+        except Exception as exc:  # noqa: BLE001 - surface, don't blank the tree
+            return [DatameshMessageItem(self, f"Could not read saved connections: {exc}")]
         if not connections:
             return [DatameshMessageItem(self, "No connections yet — right-click → New Connection…")]
         return [DatameshConnectionItem(self, conn) for conn in connections]
 
     def actions(self, parent):  # noqa: N802 (QGIS API)
+        actions = []
+        if not oceanum_available():
+            install = QAction("Install 'oceanum' Python package…", parent)
+            install.triggered.connect(lambda: install_dependency(parent))
+            actions.append(install)
         new = QAction(QgsApplication.getThemeIcon("mActionAdd.svg"), "New Connection…", parent)
         new.triggered.connect(lambda: new_connection(parent))
         settings = QAction("Datamesh settings…", parent)
         settings.triggered.connect(lambda: open_settings(parent))
         refresh = QAction("Refresh", parent)
         refresh.triggered.connect(self.refresh)
-        return [new, settings, refresh]
+        actions.extend([new, settings, refresh])
+        return actions
 
 
 class DatameshDataItemProvider(QgsDataItemProvider):
@@ -297,9 +375,9 @@ class DatameshDataItemProvider(QgsDataItemProvider):
 
     def createDataItem(self, path: str, parentItem):  # noqa: N803 (QGIS API)
         if not path:  # root of the Browser tree
-            global _ROOT_ITEM
-            _ROOT_ITEM = DatameshRootItem(parentItem)
-            return _ROOT_ITEM
+            item = DatameshRootItem(parentItem)
+            _register_root(item)  # tracked so every panel's root is refreshed
+            return item
         return None
 
 
@@ -328,8 +406,7 @@ def register(iface, store) -> DatameshDataItemProvider:
 
 
 def unregister(provider) -> None:
-    global _ROOT_ITEM
     if provider is not None:
         QgsApplication.dataItemProviderRegistry().removeProvider(provider)
     set_context(None, None)
-    _ROOT_ITEM = None
+    _ROOT_ITEMS.clear()

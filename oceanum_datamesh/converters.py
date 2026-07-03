@@ -93,11 +93,6 @@ def _guess_time(ds, coordinates: Optional[dict]) -> Optional[str]:
     return None
 
 
-def _band_dim(coordinates: Optional[dict]) -> Optional[str]:
-    """The dimension holding *true* raster bands (Datamesh ``b`` key), if any."""
-    return (coordinates or {}).get("b")
-
-
 def _geotransform(x: np.ndarray, y: np.ndarray):
     """Compute a north-up GDAL geotransform + whether the y axis needs flipping.
 
@@ -134,9 +129,9 @@ def dataset_to_rasters(
     A time dimension yields a *series of single-band temporal rasters* — one
     GeoTIFF per time step (all steps; overall volume is bounded upstream by the
     engine's query-size guard), each spec carrying its (begin, end) time range
-    and a per-variable group name. Only a true band coordinate (Datamesh ``b``
-    key) and other non-time dims (levels, ...) become bands within a file;
-    ``max_bands`` caps bands per file only.
+    and a per-variable group name. Every non-time extra dimension (a band ``b``
+    coordinate, levels, ...) becomes a band within the file; ``max_bands`` caps
+    the band count per file only.
     """
     from osgeo import gdal, osr
 
@@ -208,7 +203,10 @@ def dataset_to_rasters(
             else:
                 end = begin
             sub = da.isel({tdim: i}, drop=True)
-            path = os.path.join(out_dir, safe_name(f"{name_prefix}{var}_{begin}") + ".tif")
+            # The step index guarantees a unique path even when a long
+            # connection/variable name would truncate the timestamp away; the
+            # timestamp is the layer's display name, not its filename.
+            path = os.path.join(out_dir, f"{safe_name(f'{name_prefix}{var}', 48)}_{i:05d}.tif")
             _write_geotiff(gdal, path, sub, (xdim, ydim), gt, proj_wkt, flip_y, max_bands)
             specs.append(
                 LayerSpec(
@@ -290,12 +288,17 @@ def _fmt(value) -> str:
 
 
 def _global_range(da) -> Optional[tuple]:
-    """(min, max) of a DataArray over all dims, or ``None`` if not finite."""
-    values = np.asarray(da.values, dtype="float64")
+    """(min, max) of a DataArray over all dims, or ``None`` if not finite.
+
+    Computes on the native dtype — ``nanmin``/``nanmax`` need no float64 upcast,
+    which would otherwise transiently double the memory of a large series.
+    """
+    values = np.asarray(da.values)
     if values.size == 0:
         return None
-    vmin = float(np.nanmin(values))
-    vmax = float(np.nanmax(values))
+    with np.errstate(invalid="ignore"):
+        vmin = float(np.nanmin(values))
+        vmax = float(np.nanmax(values))
     if not (np.isfinite(vmin) and np.isfinite(vmax)):
         return None
     return (vmin, vmax)
@@ -429,8 +432,8 @@ def dataset_stations_to_vector(
 
     A time dimension is preserved as long-format rows (one feature per site and
     time step) with the time recorded in a field, so QGIS can register the layer
-    as temporal. Size-1 extra dimensions are squeezed; any other remaining extra
-    dimension is reduced to its first index.
+    as temporal. Any other extra dimension is reduced to its first index; the
+    site and time dims are always kept (even when the site dim has length 1).
     """
     import geopandas as gpd
     import numpy as np
@@ -441,14 +444,20 @@ def dataset_stations_to_vector(
     tname = _guess_time(ds, coordinates)
     sdim = ds[xname].dims[0]
 
-    reduced = ds.squeeze(drop=True)
+    # The time dimension (when separate from the site dim) is kept for
+    # long-format output.
     tdim = None
-    if tname is not None and tname in reduced.coords:
-        tdims = reduced[tname].dims
+    if tname is not None and tname in ds.coords:
+        tdims = ds[tname].dims
         tdim = tdims[0] if len(tdims) == 1 and tdims[0] != sdim else None
-    for dim in list(reduced.sizes):
-        if dim not in (sdim, tdim) and reduced.sizes[dim] > 1:
-            reduced = reduced.isel({dim: 0})
+
+    # Reduce every other dimension to its first index. Selecting (rather than
+    # squeezing) keeps the site and time dims — and their lon/lat coords —
+    # intact even when the site dim has length 1.
+    reduced = ds
+    for dim in list(ds.sizes):
+        if dim not in (sdim, tdim):
+            reduced = reduced.isel({dim: 0}, drop=True)
 
     if tdim is not None:
         # Long format: one row per (site, time). Coordinates on the site dim

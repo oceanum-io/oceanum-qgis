@@ -11,14 +11,14 @@ also covers "Blend of Gray" and any custom theme.
 
 from __future__ import annotations
 
-import os
+from pathlib import Path
 
 from qgis.core import QgsApplication
 from qgis.PyQt.QtGui import QIcon, QPalette
 
-_RES_DIR = os.path.join(os.path.dirname(__file__), "resources")
-_DARK_MARK = os.path.join(_RES_DIR, "icon.svg")  # marine mark — for light themes
-_LIGHT_MARK = os.path.join(_RES_DIR, "icon-light.svg")  # pale mark — for dark themes
+_RES_DIR = Path(__file__).parent / "resources"
+_DARK_MARK = str(_RES_DIR / "icon.svg")  # marine mark — for light themes
+_LIGHT_MARK = str(_RES_DIR / "icon-light.svg")  # pale mark — for dark themes
 
 
 def _dark_ui() -> bool:

@@ -26,9 +26,13 @@ imported lazily to match the rest of the plugin.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 SCHEMA_URL = "https://schemas.oceanum.io/datamesh/workspace.json"
 
@@ -63,36 +67,50 @@ def connection_label(conn: Connection) -> str:
 class ConnectionStore:
     """Load and save Datamesh connections as a published-schema workspace file."""
 
-    def __init__(self, path):
+    def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
 
     # -- raw items --------------------------------------------------------- #
     def _read_items(self) -> list[dict]:
-        """Return the raw WorkspaceItem dicts (empty if no/blank file)."""
+        """Return the raw WorkspaceItem dicts (empty on missing/blank/corrupt).
+
+        Malformed JSON degrades to an empty list (logged) rather than raising,
+        so one bad file cannot brick the Browser tree or block saving.
+        """
         if not self.path.exists():
             return []
-        text = self.path.read_text(encoding="utf-8")
-        if not text.strip():
+        try:
+            text = self.path.read_text(encoding="utf-8")
+            if not text.strip():
+                return []
+            data = json.loads(text)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not read connections from %s: %s", self.path, exc)
             return []
-        data = json.loads(text)
         # The workspace entity is a bare array; tolerate an enveloped record.
         if isinstance(data, dict):
             data = data.get("spec") or data.get("data") or []
-        return list(data)
+        return [item for item in data if isinstance(item, dict)]
 
-    def _write(self, connections: list[Connection]) -> None:
-        items = []
-        for conn in connections:
-            item = conn.query.model_dump(mode="json", warnings=False)
-            item["id"] = conn.id
-            item["label"] = conn.label
-            items.append(item)
+    @staticmethod
+    def _item_id(item: dict) -> str | None:
+        value = item.get("id")
+        return value if isinstance(value, str) else None
+
+    def _write_items(self, items: list[dict]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(items, indent=2), encoding="utf-8")
 
+    @staticmethod
+    def _item(query: Any, connection_id: str, label: str | None) -> dict:
+        item = query.model_dump(mode="json", warnings=False)
+        item["id"] = connection_id
+        item["label"] = label
+        return item
+
     # -- connection operations -------------------------------------------- #
     def list(self) -> list[Connection]:
-        """Return the stored connections."""
+        """Return the stored connections, skipping any that fail to parse."""
         from oceanum.datamesh import Query
 
         allowed = set(Query.model_fields)
@@ -102,7 +120,11 @@ class ConnectionStore:
             label = raw.pop("label", None)
             cid = raw.get("id") or _new_id()
             raw["id"] = cid
-            query = Query(**{k: v for k, v in raw.items() if k in allowed})
+            try:
+                query = Query(**{k: v for k, v in raw.items() if k in allowed})
+            except Exception as exc:  # noqa: BLE001 - one bad item must not poison the rest
+                logger.warning("Skipping unreadable connection %s: %s", cid, exc)
+                continue
             connections.append(Connection(id=cid, query=query, label=label))
         return connections
 
@@ -112,22 +134,28 @@ class ConnectionStore:
                 return conn
         return None
 
-    def add(self, query, label: str | None = None) -> str:
-        """Append a connection, assigning an id if it has none. Returns the id."""
+    def add(self, query: Any, label: str | None = None) -> str:
+        """Append a connection, assigning an id if it has none. Returns the id.
+
+        Operates on the raw item list so fields written by other Datamesh tools
+        (or a newer schema) on untouched connections are preserved verbatim.
+        """
         cid = getattr(query, "id", None) or _new_id()
         query.id = cid
-        connections = self.list()
-        connections.append(Connection(id=cid, query=query, label=label))
-        self._write(connections)
+        items = self._read_items()
+        items.append(self._item(query, cid, label))
+        self._write_items(items)
         return cid
 
-    def update(self, connection_id: str, query, label: str | None = None) -> None:
+    def update(self, connection_id: str, query: Any, label: str | None = None) -> None:
         """Replace the connection ``connection_id`` with *query* / *label*."""
         query.id = connection_id
-        replacement = Connection(id=connection_id, query=query, label=label)
-        connections = [replacement if c.id == connection_id else c for c in self.list()]
-        self._write(connections)
+        replacement = self._item(query, connection_id, label)
+        items = [
+            replacement if self._item_id(it) == connection_id else it for it in self._read_items()
+        ]
+        self._write_items(items)
 
     def remove(self, connection_id: str) -> None:
-        connections = [c for c in self.list() if c.id != connection_id]
-        self._write(connections)
+        items = [it for it in self._read_items() if self._item_id(it) != connection_id]
+        self._write_items(items)
