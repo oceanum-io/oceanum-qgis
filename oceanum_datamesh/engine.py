@@ -32,6 +32,58 @@ def _iso(value) -> Optional[str]:
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
+# Canonical Datamesh coordinate axis keys (oceanum.datamesh.datasource.Coordinates):
+# ``x`` easting, ``y`` northing, ``g`` an abstract feature geometry.
+_AXIS_X, _AXIS_Y, _AXIS_GEOM = "x", "y", "g"
+
+# Query fields we forward from a plain spec dict; anything else is dropped so the
+# oceanum ``Query`` model does not warn about unknown parameters.
+_QUERY_FIELDS = frozenset(
+    {
+        "datasource",
+        "parameters",
+        "description",
+        "variables",
+        "timefilter",
+        "geofilter",
+        "levelfilter",
+        "coordfilter",
+        "crs",
+        "aggregate",
+        "functions",
+        "limit",
+        "id",
+    }
+)
+
+
+def map_compatibility(coordkeys) -> tuple[bool, str]:
+    """Decide whether a staged query can be shown on the QGIS map.
+
+    A Datamesh view is map-compatible when it is georeferenced: either it
+    exposes both an ``x`` and ``y`` coordinate (grids and station points) or an
+    abstract geometry coordinate ``g`` (feature collections). Pure time series
+    and plain tables expose neither and cannot be placed on the map.
+
+    ``coordkeys`` is the ``Stage.coordkeys`` mapping; we inspect both its keys
+    and values so the check is robust to the mapping orientation.
+    """
+    tokens = set()
+    for key, value in dict(coordkeys or {}).items():
+        tokens.add(str(getattr(key, "value", key)).lower())
+        tokens.add(str(getattr(value, "value", value)).lower())
+    if _AXIS_GEOM in tokens:
+        return True, "geometry"
+    if _AXIS_X in tokens and _AXIS_Y in tokens:
+        return True, "x/y"
+    return (
+        False,
+        "This view has no spatial coordinates (it needs x and y, or a geometry) "
+        "so it cannot be shown on the map. Choose a different datasource or "
+        "variables.",
+    )
+
+
 class DatameshEngine:
     """Search the catalog, inspect datasources and run queries.
 
@@ -83,12 +135,27 @@ class DatameshEngine:
         return self._connector
 
     # -- catalog search ---------------------------------------------------- #
-    def search(
-        self, text=None, geofilter=None, timefilter=None, limit=200
-    ) -> list[dict]:
+    @staticmethod
+    def _as_geofilter(geofilter):
+        """Coerce a plain geofilter dict into an OceanQL ``GeoFilter`` model.
+
+        ``get_catalog`` interprets a raw dict as a GeoJSON *geometry*, so a
+        ``{"type": "bbox", ...}`` spec dict must be validated into the GeoFilter
+        model first or it fails with "Unknown geometry type bbox".
+        """
+        if not isinstance(geofilter, dict):
+            return geofilter
+        from oceanum.datamesh.query import GeoFilter
+
+        return GeoFilter(**geofilter)
+
+    def search(self, text=None, geofilter=None, timefilter=None, limit=200) -> list[dict]:
         """Return a list of catalog summary dicts matching the filters."""
         cat = self.connect().get_catalog(
-            search=text or None, geofilter=geofilter, timefilter=timefilter, limit=limit
+            search=text or None,
+            geofilter=self._as_geofilter(geofilter),
+            timefilter=timefilter,
+            limit=limit,
         )
         features = {}
         raw = getattr(cat, "_geojson", None)
@@ -114,37 +181,91 @@ class DatameshEngine:
         except DatameshError:
             raise
         except Exception as exc:  # noqa: BLE001
-            raise DatameshError(
-                f"Could not load metadata for {datasource_id}: {exc}"
-            ) from exc
+            raise DatameshError(f"Could not load metadata for {datasource_id}: {exc}") from exc
 
     def datasource_summary(self, datasource_id: str) -> dict:
         return self._summarize_datasource(self.datasource(datasource_id))
 
-    # -- query ------------------------------------------------------------- #
-    def query(self, spec: dict):
-        """Run a query described by *spec* and return the raw container.
+    # -- staging ----------------------------------------------------------- #
+    def _as_query(self, spec):
+        """Coerce a spec dict into an oceanum ``Query`` (pass a Query through)."""
+        from oceanum.datamesh import Query
 
-        *spec* keys: ``datasource`` (required), ``variables``, ``timefilter``,
-        ``geofilter``, ``use_dask``. Returns an ``xarray.Dataset``,
-        ``geopandas.GeoDataFrame``, ``pandas.DataFrame`` or ``None`` (no data).
+        if isinstance(spec, Query):
+            return spec
+        fields = {
+            k: v for k, v in dict(spec).items() if k in _QUERY_FIELDS and v not in (None, [], {})
+        }
+        return Query(**fields)
+
+    def stage(self, spec):
+        """Stage a query (metadata only) and return its ``Stage``, or ``None``.
+
+        Uses the Datamesh stage endpoint, which validates the query and reports
+        the coordinate keys, container type and size *without* downloading data.
         """
         conn = self.connect()
-        kwargs = {"datasource": spec["datasource"]}
-        if spec.get("variables"):
-            kwargs["variables"] = list(spec["variables"])
-        if spec.get("timefilter"):
-            kwargs["timefilter"] = spec["timefilter"]
-        if spec.get("geofilter"):
-            kwargs["geofilter"] = spec["geofilter"]
+        query = self._as_query(spec)
+        from oceanum.datamesh.session import Session
+
+        session = Session.acquire(conn)
+        try:
+            return conn._stage_request(query, session)
+        except DatameshError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise DatameshError(f"Could not stage this query: {exc}") from exc
+        finally:
+            try:
+                session.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def stage_compatibility(self, spec) -> tuple:
+        """Stage a query and report ``(stage, compatible, reason)``.
+
+        ``stage`` is ``None`` when the query returns no data. Compatibility is
+        decided from the stage's coordinate keys (needs x/y or a geometry).
+        """
+        stage = self.stage(spec)
+        if stage is None:
+            return None, False, "This query returns no data for the current filters."
+        compatible, reason = map_compatibility(getattr(stage, "coordkeys", None))
+        return stage, compatible, reason
+
+    # -- query ------------------------------------------------------------- #
+    def query(self, spec):
+        """Run a query and return the raw container.
+
+        *spec* may be an ``oceanum.datamesh.Query`` (e.g. a saved connection) or
+        a spec dict with keys ``datasource`` (required), ``variables``,
+        ``timefilter``, ``geofilter``, ``use_dask``. Returns an
+        ``xarray.Dataset``, ``geopandas.GeoDataFrame``, ``pandas.DataFrame`` or
+        ``None`` (no data).
+        """
+        conn = self.connect()
+        use_dask = False
+        try:
+            from oceanum.datamesh import Query as query_cls  # noqa: N813
+        except ImportError:  # pragma: no cover - handled by connect()
+            query_cls = None
+        if query_cls is not None and isinstance(spec, query_cls):
+            kwargs = {"query": spec}
+        else:
+            kwargs = {"datasource": spec["datasource"]}
+            if spec.get("variables"):
+                kwargs["variables"] = list(spec["variables"])
+            if spec.get("timefilter"):
+                kwargs["timefilter"] = spec["timefilter"]
+            if spec.get("geofilter"):
+                kwargs["geofilter"] = spec["geofilter"]
+            use_dask = bool(spec.get("use_dask", False))
         import warnings
 
         try:
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
-                result = conn.query(
-                    use_dask=bool(spec.get("use_dask", False)), **kwargs
-                )
+                result = conn.query(use_dask=use_dask, **kwargs)
             for w in caught:
                 if "too large for direct access" in str(w.message):
                     raise DatameshError(_TOO_LARGE_MSG)
@@ -193,8 +314,7 @@ class DatameshEngine:
         coordinates = {}
         try:
             coordinates = {
-                str(getattr(k, "value", k)): v
-                for k, v in (dsrc.coordinates or {}).items()
+                str(getattr(k, "value", k)): v for k, v in (dsrc.coordinates or {}).items()
             }
         except Exception:  # noqa: BLE001
             coordinates = {}

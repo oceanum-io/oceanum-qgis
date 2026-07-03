@@ -1,20 +1,19 @@
 # Copyright 2026 Oceanum / Dave Johnson
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
-"""QGIS plugin class: wires the dock widget into the QGIS GUI."""
+"""QGIS plugin class: wires Datamesh connections into the Browser and menus."""
 
 from __future__ import annotations
 
 import os
 
-from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtWidgets import QAction, QDockWidget
+from qgis.core import QgsApplication
+from qgis.PyQt.QtWidgets import QAction
 
 from . import browser
-from .gui.dock import DatameshPanel
+from .icons import plugin_icon
+from .workspace import ConnectionStore
 
 PLUGIN_NAME = "Oceanum Datamesh"
-ICON_PATH = os.path.join(os.path.dirname(__file__), "resources", "icon.svg")
 
 
 class OceanumDatameshPlugin:
@@ -22,57 +21,54 @@ class OceanumDatameshPlugin:
 
     def __init__(self, iface):
         self.iface = iface
-        self.action: QAction | None = None
-        self.dock: QDockWidget | None = None
+        self.actions: list[QAction] = []
+        self.toolbar_action: QAction | None = None
         self.browser_provider = None
+        self.store: ConnectionStore | None = None
 
     # -- QGIS lifecycle ---------------------------------------------------- #
     def initGui(self) -> None:  # noqa: N802 (QGIS API)
-        icon = QIcon(ICON_PATH)
-        self.action = QAction(icon, PLUGIN_NAME, self.iface.mainWindow())
-        self.action.setCheckable(True)
-        self.action.setToolTip("Search and load Oceanum Datamesh data")
-        self.action.triggered.connect(self.toggle_dock)
+        self.store = ConnectionStore(_connections_path())
 
-        self.iface.addPluginToWebMenu(PLUGIN_NAME, self.action)
-        self.iface.addToolBarIcon(self.action)
+        # Toolbar + Web menu: create a new connection.
+        self.toolbar_action = QAction(
+            plugin_icon(), "New Datamesh connection…", self.iface.mainWindow()
+        )
+        self.toolbar_action.setToolTip("Create a new Oceanum Datamesh connection")
+        self.toolbar_action.triggered.connect(self.new_connection)
+        self.iface.addToolBarIcon(self.toolbar_action)
+        self.iface.addPluginToWebMenu(PLUGIN_NAME, self.toolbar_action)
 
-        self.dock = QDockWidget(PLUGIN_NAME, self.iface.mainWindow())
-        self.dock.setObjectName("OceanumDatameshDock")
-        self.dock.setWidget(DatameshPanel(self.iface, self.dock))
-        self.dock.visibilityChanged.connect(self._on_visibility_changed)
-        self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock)
-        self.dock.hide()
+        settings_action = QAction("Datamesh settings…", self.iface.mainWindow())
+        settings_action.setToolTip("Set the Datamesh token, service and user")
+        settings_action.triggered.connect(self.open_settings)
+        self.iface.addPluginToWebMenu(PLUGIN_NAME, settings_action)
 
-        # Add "Oceanum Datamesh" to the Browser panel (top-left sources tree).
-        self.browser_provider = browser.register(self.open_datasource_in_panel)
+        self.actions = [self.toolbar_action, settings_action]
+
+        # Add "Oceanum Datamesh" connections to the Browser (top-left Sources).
+        self.browser_provider = browser.register(self.iface, self.store)
 
     def unload(self) -> None:
         if self.browser_provider is not None:
             browser.unregister(self.browser_provider)
             self.browser_provider = None
-        if self.action is not None:
-            self.iface.removePluginWebMenu(PLUGIN_NAME, self.action)
-            self.iface.removeToolBarIcon(self.action)
-            self.action = None
-        if self.dock is not None:
-            self.iface.removeDockWidget(self.dock)
-            self.dock.deleteLater()
-            self.dock = None
+        for action in self.actions:
+            self.iface.removePluginWebMenu(PLUGIN_NAME, action)
+        if self.toolbar_action is not None:
+            self.iface.removeToolBarIcon(self.toolbar_action)
+        self.actions = []
+        self.toolbar_action = None
 
     # -- callbacks --------------------------------------------------------- #
-    def toggle_dock(self, checked: bool) -> None:
-        if self.dock is not None:
-            self.dock.setVisible(checked)
+    def new_connection(self, _checked: bool = False) -> None:
+        browser.new_connection(self.iface.mainWindow())
 
-    def _on_visibility_changed(self, visible: bool) -> None:
-        if self.action is not None:
-            self.action.setChecked(visible)
+    def open_settings(self, _checked: bool = False) -> None:
+        browser.open_settings(self.iface.mainWindow())
 
-    def open_datasource_in_panel(self, datasource_id: str) -> None:
-        """Show the dock and load a datasource into it (from a Browser item)."""
-        if self.dock is None:
-            return
-        self.dock.setVisible(True)
-        self.dock.raise_()
-        self.dock.widget().show_datasource(datasource_id)
+
+def _connections_path() -> str:
+    """Per-profile workspace file that stores the Datamesh connections."""
+    profile = QgsApplication.qgisSettingsDirPath()
+    return os.path.join(profile, "oceanum_datamesh", "connections.json")

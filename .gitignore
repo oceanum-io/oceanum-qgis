@@ -12,3 +12,6 @@ oceanum_datamesh/resources_rc.py
 .vscode/
 .idea/
 .DS_Store
+# QGIS test artifacts + local Claude session config
+symbology-style.db
+.claude/
