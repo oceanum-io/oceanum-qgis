@@ -67,14 +67,16 @@ def test_grid_dataset_to_geotiff(grid_dataset, tmp_path):
     specs = converters.dataset_to_layers(
         grid_dataset, str(tmp_path), "wave", variables=["hs"], coordinates=COORDS
     )
-    assert len(specs) == 1
-    spec = specs[0]
-    assert spec.kind == "raster"
-    ds = gdal.Open(spec.path)
-    assert ds is not None
-    assert ds.RasterXSize == 5 and ds.RasterYSize == 4
-    assert ds.RasterCount == 2  # two time steps -> two bands
-    assert ds.GetProjection()  # CRS set
+    # Two time steps -> a series of two single-band temporal rasters.
+    assert len(specs) == 2
+    for spec in specs:
+        assert spec.kind == "raster"
+        assert spec.time_range is not None
+        ds = gdal.Open(spec.path)
+        assert ds is not None
+        assert ds.RasterXSize == 5 and ds.RasterYSize == 4
+        assert ds.RasterCount == 1
+        assert ds.GetProjection()  # CRS set
 
 
 def test_station_dataset_to_points(station_dataset, tmp_path):

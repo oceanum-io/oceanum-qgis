@@ -3,9 +3,10 @@
 Search, query, load and display [Oceanum Datamesh](https://oceanum.io) ocean and
 environmental data directly inside QGIS.
 
-The plugin adds a dockable panel where you can search the Datamesh catalogue,
-inspect a dataset's metadata, filter it by variable / time / area, and load the
-result as a native QGIS layer.
+The plugin adds an **Oceanum Datamesh** entry to the QGIS Browser panel that
+holds named *connections* — ArcGIS-style saved views. Each connection is a
+Datamesh (OceanQL) query: a datasource plus variable, time and spatial filters.
+Double-click a connection to load its view as native QGIS layers.
 
 ## What you get
 
@@ -13,12 +14,15 @@ Datamesh returns three kinds of container, each mapped to the natural QGIS layer
 
 | Datamesh result                        | QGIS layer                                   |
 | -------------------------------------- | -------------------------------------------- |
-| Gridded dataset (`xarray.Dataset`)     | **Raster** (GeoTIFF, one file per variable, one band per time step) |
-| Station / scatter dataset (points sharing one dimension) | **Vector** points (GeoPackage) |
+| Gridded dataset with a time coordinate (`xarray.Dataset`) | A **series of single-band temporal rasters** (one GeoTIFF per time step), grouped per variable, registered with the Temporal Controller and styled on a shared colour scale |
+| Gridded dataset, static (or with a true band `b` coordinate) | **Raster** (GeoTIFF; `b`/level dims become bands) |
+| Station / scatter dataset (points sharing one dimension) | **Vector** points (GeoPackage); a time dimension becomes long-format features with a datetime field (temporal) |
 | Feature dataset (`geopandas.GeoDataFrame`) | **Vector** (GeoPackage)                 |
 | Table (`pandas.DataFrame`)             | **Vector** points if it has lon/lat columns, otherwise an attribute **table** (CSV) |
 
-All layers are created in EPSG:4326.
+All layers are created in EPSG:4326. Layers with time are temporal-active:
+open *View → Panels → Temporal Controller*, enable animated navigation, set the
+range to full and press play.
 
 ## Requirements
 
@@ -48,8 +52,7 @@ Then enable **Oceanum Datamesh** in *Plugins → Manage and Install Plugins*.
 
 ### 2. The `oceanum` dependency
 
-Open the plugin panel; if `oceanum` is not present it shows an **Install** button.
-Alternatively install it yourself into the QGIS Python, e.g.:
+Install it into the QGIS Python, e.g.:
 
 ```bash
 python3 -m pip install --user oceanum        # add --break-system-packages if needed
@@ -62,8 +65,9 @@ python3 -m pip install --user oceanum        # add --break-system-packages if ne
 
 ### 3. Your token
 
-Set it once via the panel's **Settings…** dialog (stored in QGIS settings for the
-profile), or export it in the environment before launching QGIS:
+Set it via **Web → Oceanum Datamesh → Datamesh settings…** (stored in QGIS
+settings for the profile), or export it in the environment before launching
+QGIS:
 
 ```bash
 export DATAMESH_TOKEN=...       # required
@@ -73,24 +77,27 @@ export DATAMESH_USER=...        # optional
 
 ## Using it
 
-1. Click the Oceanum Datamesh toolbar icon to open the panel.
-2. **Search** the catalogue by keyword (optionally restricted to the current map
-   canvas extent).
-3. Select a dataset to see its description, time range, bounds and variables.
-4. Choose **variables**, a **time** window and an **area** (full extent, current
-   canvas, or a manual bounding box).
-5. Click **Load to map**.
+1. In the **Browser** panel (top-left Sources tree), right-click
+   **Oceanum Datamesh → New Connection…** (or use the toolbar icon).
+2. **Search** the catalogue by keyword (optionally restricted to the current
+   map canvas extent) and pick a datasource.
+3. Choose **variables**, a **time** window and an **area** — full extent,
+   current canvas, a manual bounding box, or **feature(s) selected on the map**
+   (a point, multipoint or single polygon).
+4. Click **Stage & check**. The query is validated against Datamesh (metadata
+   only — no download) and checked for map compatibility: the view must have
+   x/y coordinates or a geometry. The size and container type are reported.
+5. **Save**. The connection appears under Oceanum Datamesh in the Browser.
+6. **Double-click** the connection (or right-click → *Add to map*) to load its
+   view. Right-click also offers *Edit…*, *Duplicate* and *Delete*.
+
+Connections are persisted per QGIS profile in the published
+[Datamesh workspace schema](https://schemas.oceanum.io/datamesh/workspace.json)
+(`connections.json`: an array of OceanQL queries with an `id` and `label`), so
+they round-trip with other Oceanum tooling.
 
 Queries run on a background thread (`QgsTask`) so QGIS stays responsive; layers
 are added when the download finishes.
-
-### From the Browser panel
-
-The plugin also adds an **Oceanum Datamesh** entry to the QGIS **Browser** panel
-(top-left Sources tree). Expand it to browse a sample of the catalogue, or
-right-click it and choose **Set catalog filter…** to search (e.g. "wave"),
-then double-click a dataset to open the panel with it selected, ready to filter
-and load.
 
 ### Query size
 
@@ -104,7 +111,7 @@ want.
 
 ```bash
 make lint      # ruff
-make test      # pytest (offline unit tests: converters + engine)
+make test      # pytest (offline unit tests + QGIS-bindings tests)
 make deploy    # symlink into the QGIS plugins dir for live testing
 ```
 
@@ -119,20 +126,24 @@ default path (QGIS 4 on Debian: `/usr/share/qgis/python`).
 oceanum_datamesh/
   __init__.py          classFactory (QGIS entry point)
   metadata.txt         plugin manifest (supportsQt6=True)
-  plugin.py            QGIS GUI wiring (toolbar, menu, dock)
-  engine.py            oceanum client wrapper (search / metadata / query)   [no QGIS imports]
-  converters.py        result -> GeoTIFF / GeoPackage / CSV                 [no QGIS imports]
+  plugin.py            QGIS GUI wiring (toolbar, Web menu, Browser provider)
+  browser.py           Browser integration: connection items + actions
+  workspace.py         connection persistence (Datamesh workspace schema)  [no QGIS imports]
+  engine.py            oceanum client wrapper (search / stage / query)     [no QGIS imports]
+  converters.py        result -> GeoTIFF / GeoPackage / CSV                [no QGIS imports]
+  layers.py            layer creation, temporal registration, shared style
+  icons.py             theme-aware (light/dark) brand icon selection
   tasks.py             background QgsTask runner
   utils.py             extent transform + temp storage helpers
   dependencies.py      detect / install the oceanum package
-  gui/                 dock panel + settings dialog
-  resources/           icon
+  gui/                 connection dialog + settings dialog
+  resources/           icons (marine + light variants)
 tests/                 offline pytest suite
 ```
 
-`engine.py` and `converters.py` deliberately avoid importing QGIS, so the network
-and data-conversion logic is testable standalone and safe to run off the GUI
-thread.
+`engine.py`, `converters.py` and `workspace.py` deliberately avoid importing
+QGIS, so the network, persistence and data-conversion logic is testable
+standalone and safe to run off the GUI thread.
 
 ## Licence
 

@@ -11,13 +11,39 @@ from __future__ import annotations
 
 from typing import Callable
 
-from qgis.core import Qgis, QgsMessageLog, QgsTask
+from qgis.core import Qgis, QgsApplication, QgsMessageLog, QgsTask
 
 LOG_TAG = "Oceanum Datamesh"
 
 
 def log(message: str, level=Qgis.Info) -> None:
     QgsMessageLog.logMessage(str(message), LOG_TAG, level)
+
+
+def push_message(iface, text: str, level=Qgis.Info) -> None:
+    """Show a message in the QGIS message bar under the plugin's tag."""
+    if iface is not None:
+        iface.messageBar().pushMessage(LOG_TAG, text, level=level)
+
+
+def run_task(description: str, work: Callable, done: Callable, registry: list) -> FunctionTask:
+    """Submit a :class:`FunctionTask` to the QGIS task manager.
+
+    The task is kept alive in *registry* (a caller-owned list) until it finishes,
+    then removed — QGIS drops tasks whose only reference is the manager, so the
+    registry prevents premature garbage collection. Returns the task.
+    """
+    task = FunctionTask(description, work, done)
+    registry.append(task)
+
+    def _cleanup(*_):
+        if task in registry:
+            registry.remove(task)
+
+    task.taskCompleted.connect(_cleanup)
+    task.taskTerminated.connect(_cleanup)
+    QgsApplication.taskManager().addTask(task)
+    return task
 
 
 class FunctionTask(QgsTask):

@@ -37,6 +37,17 @@ class LayerSpec:
     path: str
     name: str
     sublayer: Optional[str] = None  # GeoPackage layer name, if any
+    # Temporal metadata so QGIS can register the layer with the Temporal
+    # Controller: a (begin, end) ISO range for a raster time step, or the name
+    # of the datetime field for vectors.
+    time_range: Optional[tuple] = None
+    time_field: Optional[str] = None
+    # Layer-tree group to place the layer in (e.g. one group per variable
+    # holding its series of time-step rasters).
+    group: Optional[str] = None
+    # Global (min, max) of the variable across the whole series, so every
+    # time-step layer is styled on the same colour scale.
+    value_range: Optional[tuple] = None
 
 
 def safe_name(text: str, maxlen: int = 60) -> str:
@@ -64,6 +75,22 @@ def _guess_xy(ds, coordinates: Optional[dict]) -> tuple[Optional[str], Optional[
     if yname not in coords:
         yname = next((n for n in _Y_NAMES if n in coords), None)
     return xname, yname
+
+
+def _guess_time(ds, coordinates: Optional[dict]) -> Optional[str]:
+    """Return the time coordinate name of an xarray dataset, if any.
+
+    Prefers the Datamesh ``t`` coordinate key, then falls back to any coordinate
+    with a datetime dtype.
+    """
+    if coordinates:
+        tname = coordinates.get("t")
+        if tname in ds.coords:
+            return tname
+    for cname in ds.coords:
+        if np.issubdtype(np.asarray(ds[cname].values).dtype, np.datetime64):
+            return str(cname)
+    return None
 
 
 def _geotransform(x: np.ndarray, y: np.ndarray):
@@ -97,10 +124,14 @@ def dataset_to_rasters(
     name_prefix: str = "",
     max_bands: int = 366,
 ) -> list[LayerSpec]:
-    """Write each 2-D+ data variable of *ds* to a GeoTIFF and return specs.
+    """Write the gridded data variables of *ds* to GeoTIFFs and return specs.
 
-    Extra dimensions (time, level, ...) become raster bands. ``max_bands`` caps
-    the number of bands written per variable to keep files manageable.
+    A time dimension yields a *series of single-band temporal rasters* — one
+    GeoTIFF per time step (all steps; overall volume is bounded upstream by the
+    engine's query-size guard), each spec carrying its (begin, end) time range
+    and a per-variable group name. Every non-time extra dimension (a band ``b``
+    coordinate, levels, ...) becomes a band within the file; ``max_bands`` caps
+    the band count per file only.
     """
     from osgeo import gdal, osr
 
@@ -130,6 +161,8 @@ def dataset_to_rasters(
     srs.ImportFromEPSG(4326)
     proj_wkt = srs.ExportToWkt()
 
+    tname = _guess_time(ds, coordinates)
+
     if variables:
         var_list = [v for v in variables if v in ds.data_vars]
     else:
@@ -140,51 +173,91 @@ def dataset_to_rasters(
         da = ds[var]
         if xdim not in da.dims or ydim not in da.dims:
             continue  # not a gridded field
-        extra_dims = [d for d in da.dims if d not in (xdim, ydim)]
-        da = da.transpose(*extra_dims, ydim, xdim)
-
-        values = np.asarray(da.values, dtype="float32")
-        ny, nx = values.shape[-2], values.shape[-1]
-        stack = values.reshape((-1, ny, nx)) if extra_dims else values.reshape((1, ny, nx))
-
-        nbands = stack.shape[0]
-        truncated = nbands > max_bands
-        if truncated:
-            stack = stack[:max_bands]
-            nbands = max_bands
-        if flip_y:
-            stack = stack[:, ::-1, :]
-
-        band_labels = _band_labels(da, extra_dims, nbands)
-
-        path = os.path.join(out_dir, safe_name(f"{name_prefix}{var}") + ".tif")
-        drv = gdal.GetDriverByName("GTiff")
-        out = drv.Create(
-            path,
-            nx,
-            ny,
-            nbands,
-            gdal.GDT_Float32,
-            options=["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=IF_SAFER"],
-        )
-        out.SetGeoTransform(gt)
-        out.SetProjection(proj_wkt)
-        for i in range(nbands):
-            band = out.GetRasterBand(i + 1)
-            band.WriteArray(stack[i])
-            band.SetNoDataValue(float("nan"))
-            if band_labels:
-                band.SetDescription(band_labels[i])
-        out.FlushCache()
-        out = None  # noqa: F841 (close dataset)
 
         label = da.attrs.get("long_name") or da.attrs.get("standard_name") or var
         units = da.attrs.get("units")
         display = f"{label} ({units})" if units else str(label)
-        specs.append(LayerSpec("raster", path, display))
+
+        tdim = tname if (tname and tname in da.dims) else None
+        if tdim is None:
+            # Static field: any extra dims (a true ``b`` band coordinate,
+            # levels, ...) become bands of a single file.
+            path = os.path.join(out_dir, safe_name(f"{name_prefix}{var}") + ".tif")
+            _write_geotiff(gdal, path, da, (xdim, ydim), gt, proj_wkt, flip_y, max_bands)
+            specs.append(LayerSpec("raster", path, display))
+            continue
+
+        # Temporal field: one single-file raster per time step, grouped per
+        # variable; each step covers [its time, the next time). All steps share
+        # the variable's global value range so their colour scales match.
+        tvalues = np.atleast_1d(ds[tname].values)
+        nsteps = tvalues.size
+        iso = [_fmt(v) for v in tvalues]
+        value_range = _global_range(da)
+        for i in range(nsteps):
+            begin = iso[i]
+            if i + 1 < tvalues.size:
+                end = iso[i + 1]
+            elif tvalues.size > 1:
+                end = _fmt(tvalues[i] + (tvalues[i] - tvalues[i - 1]))
+            else:
+                end = begin
+            sub = da.isel({tdim: i}, drop=True)
+            # The step index guarantees a unique path even when a long
+            # connection/variable name would truncate the timestamp away; the
+            # timestamp is the layer's display name, not its filename.
+            path = os.path.join(out_dir, f"{safe_name(f'{name_prefix}{var}', 48)}_{i:05d}.tif")
+            _write_geotiff(gdal, path, sub, (xdim, ydim), gt, proj_wkt, flip_y, max_bands)
+            specs.append(
+                LayerSpec(
+                    "raster",
+                    path,
+                    begin,
+                    time_range=(begin, end),
+                    group=display,
+                    value_range=value_range,
+                )
+            )
     if not specs:
         raise ValueError("No griddable variables found in the dataset.")
     return specs
+
+
+def _write_geotiff(gdal, path, da, xydims, gt, proj_wkt, flip_y, max_bands) -> None:
+    """Write a (possibly banded) DataArray slice to a GeoTIFF."""
+    xdim, ydim = xydims
+    extra_dims = [d for d in da.dims if d not in (xdim, ydim)]
+    da = da.transpose(*extra_dims, ydim, xdim)
+
+    values = np.asarray(da.values, dtype="float32")
+    ny, nx = values.shape[-2], values.shape[-1]
+    stack = values.reshape((-1, ny, nx))
+    nbands = min(stack.shape[0], max_bands)
+    stack = stack[:nbands]
+    if flip_y:
+        stack = stack[:, ::-1, :]
+
+    band_labels = _band_labels(da, extra_dims, nbands)
+
+    drv = gdal.GetDriverByName("GTiff")
+    out = drv.Create(
+        path,
+        nx,
+        ny,
+        nbands,
+        gdal.GDT_Float32,
+        options=["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=IF_SAFER"],
+    )
+    out.SetGeoTransform(gt)
+    out.SetProjection(proj_wkt)
+    for i in range(nbands):
+        band = out.GetRasterBand(i + 1)
+        band.WriteArray(stack[i])
+        band.SetNoDataValue(float("nan"))
+        if band_labels:
+            band.SetDescription(band_labels[i])
+    out.FlushCache()
+    out = None  # noqa: F841 (close dataset)
 
 
 def _band_labels(da, extra_dims, nbands) -> Optional[list]:
@@ -214,10 +287,29 @@ def _fmt(value) -> str:
         return str(value)
 
 
+def _global_range(da) -> Optional[tuple]:
+    """(min, max) of a DataArray over all dims, or ``None`` if not finite.
+
+    Computes on the native dtype — ``nanmin``/``nanmax`` need no float64 upcast,
+    which would otherwise transiently double the memory of a large series.
+    """
+    values = np.asarray(da.values)
+    if values.size == 0:
+        return None
+    with np.errstate(invalid="ignore"):
+        vmin = float(np.nanmin(values))
+        vmax = float(np.nanmax(values))
+    if not (np.isfinite(vmin) and np.isfinite(vmax)):
+        return None
+    return (vmin, vmax)
+
+
 # --------------------------------------------------------------------------- #
 # Vector / table
 # --------------------------------------------------------------------------- #
-def geodataframe_to_gpkg(gdf, out_dir: str, name: str) -> LayerSpec:
+def geodataframe_to_gpkg(
+    gdf, out_dir: str, name: str, coordinates: Optional[dict] = None
+) -> LayerSpec:
     """Write a GeoDataFrame to a GeoPackage and return its spec."""
     os.makedirs(out_dir, exist_ok=True)
     g = gdf.copy()
@@ -229,7 +321,9 @@ def geodataframe_to_gpkg(gdf, out_dir: str, name: str) -> LayerSpec:
     layer = safe_name(name)
     path = os.path.join(out_dir, layer + ".gpkg")
     g.to_file(path, layer=layer, driver="GPKG")
-    return LayerSpec("vector", path, name, sublayer=layer)
+    return LayerSpec(
+        "vector", path, name, sublayer=layer, time_field=_guess_frame_time(g, coordinates)
+    )
 
 
 def dataframe_to_layer(
@@ -248,11 +342,34 @@ def dataframe_to_layer(
         layer = safe_name(name)
         path = os.path.join(out_dir, layer + ".gpkg")
         gdf.to_file(path, layer=layer, driver="GPKG")
-        return LayerSpec("vector", path, name, sublayer=layer)
+        return LayerSpec(
+            "vector",
+            path,
+            name,
+            sublayer=layer,
+            time_field=_guess_frame_time(frame, coordinates),
+        )
 
     path = os.path.join(out_dir, safe_name(name) + ".csv")
     frame.to_csv(path, index=False)
     return LayerSpec("table", path, name)
+
+
+def _guess_frame_time(frame, coordinates) -> Optional[str]:
+    """Name of the datetime column of a (Geo)DataFrame, if one exists.
+
+    Prefers the Datamesh ``t`` coordinate key, then any datetime64 column.
+    """
+    import pandas as pd
+
+    if coordinates:
+        tcol = coordinates.get("t")
+        if tcol in frame.columns:
+            return str(tcol)
+    for col in frame.columns:
+        if pd.api.types.is_datetime64_any_dtype(frame[col]):
+            return str(col)
+    return None
 
 
 def _guess_frame_xy(frame, coordinates):
@@ -313,9 +430,10 @@ def dataset_stations_to_vector(
 ) -> LayerSpec:
     """Write a station/scatter Dataset (points sharing one dim) to a GeoPackage.
 
-    Size-1 extra dimensions (e.g. a single selected time) are squeezed; any
-    remaining extra dimension is reduced to its first index so each site yields
-    exactly one point feature.
+    A time dimension is preserved as long-format rows (one feature per site and
+    time step) with the time recorded in a field, so QGIS can register the layer
+    as temporal. Any other extra dimension is reduced to its first index; the
+    site and time dims are always kept (even when the site dim has length 1).
     """
     import geopandas as gpd
     import numpy as np
@@ -323,33 +441,60 @@ def dataset_stations_to_vector(
 
     os.makedirs(out_dir, exist_ok=True)
     xname, yname = _guess_xy(ds, coordinates)
+    tname = _guess_time(ds, coordinates)
     sdim = ds[xname].dims[0]
 
-    reduced = ds.squeeze(drop=True)
-    for dim in list(reduced.sizes):
-        if dim != sdim and reduced.sizes[dim] > 1:
-            reduced = reduced.isel({dim: 0})
+    # The time dimension (when separate from the site dim) is kept for
+    # long-format output.
+    tdim = None
+    if tname is not None and tname in ds.coords:
+        tdims = ds[tname].dims
+        tdim = tdims[0] if len(tdims) == 1 and tdims[0] != sdim else None
 
-    lon = np.asarray(ds[xname].values).ravel()
-    lat = np.asarray(ds[yname].values).ravel()
+    # Reduce every other dimension to its first index. Selecting (rather than
+    # squeezing) keeps the site and time dims — and their lon/lat coords —
+    # intact even when the site dim has length 1.
+    reduced = ds
+    for dim in list(ds.sizes):
+        if dim not in (sdim, tdim):
+            reduced = reduced.isel({dim: 0}, drop=True)
 
-    columns: dict = {}
-    for cname in reduced.coords:
-        if reduced[cname].dims == (sdim,) and cname not in (xname, yname):
-            columns[str(cname)] = np.asarray(reduced[cname].values)
+    if tdim is not None:
+        # Long format: one row per (site, time). Coordinates on the site dim
+        # (including lon/lat) are broadcast across time by to_dataframe().
+        var_list = [
+            v
+            for v in (variables or list(reduced.data_vars))
+            if v in reduced.data_vars and set(reduced[v].dims) <= {sdim, tdim}
+        ]
+        frame = reduced[var_list].to_dataframe().reset_index()
+        frame = frame.drop(
+            columns=[c for c in (sdim,) if c in frame.columns and c not in reduced.coords]
+        )
+        lon = frame[xname].to_numpy()
+        lat = frame[yname].to_numpy()
+        frame = frame.drop(columns=[xname, yname])
+        time_field = str(tname)
+    else:
+        lon = np.asarray(ds[xname].values).ravel()
+        lat = np.asarray(ds[yname].values).ravel()
+        columns: dict = {}
+        for cname in reduced.coords:
+            if reduced[cname].dims == (sdim,) and cname not in (xname, yname):
+                columns[str(cname)] = np.asarray(reduced[cname].values)
+        var_list = variables or list(reduced.data_vars)
+        for var in var_list:
+            if var in reduced.data_vars and reduced[var].dims == (sdim,):
+                columns[str(var)] = np.asarray(reduced[var].values).ravel()
+        frame = pd.DataFrame(columns)
+        time_field = None
 
-    var_list = variables or list(reduced.data_vars)
-    for var in var_list:
-        if var in reduced.data_vars and reduced[var].dims == (sdim,):
-            columns[str(var)] = np.asarray(reduced[var].values).ravel()
-
-    frame = pd.DataFrame(columns)
     frame = _stringify_awkward_columns(frame)
     gdf = gpd.GeoDataFrame(frame, geometry=gpd.points_from_xy(lon, lat), crs=4326)
     layer = safe_name(name)
     path = os.path.join(out_dir, layer + ".gpkg")
     gdf.to_file(path, layer=layer, driver="GPKG")
-    return LayerSpec("vector", path, name, sublayer=layer)
+    return LayerSpec("vector", path, name, sublayer=layer, time_field=time_field)
 
 
 def dataset_to_layers(
@@ -397,7 +542,7 @@ def result_to_layers(
         import geopandas as gpd
 
         if isinstance(result, gpd.GeoDataFrame):
-            return [geodataframe_to_gpkg(result, out_dir, name)]
+            return [geodataframe_to_gpkg(result, out_dir, name, coordinates=coordinates)]
     except ImportError:
         pass
 
