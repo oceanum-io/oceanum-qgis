@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 
 from qgis.core import QgsSettings
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -17,6 +18,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 SETTINGS_GROUP = "oceanum_datamesh"
+TOKEN_URL = "https://dashboard.oceanum.io/settings"
 
 
 def _get(key: str, env: str, default: str = "") -> str:
@@ -47,8 +49,11 @@ class SettingsDialog(QDialog):
         intro = QLabel(
             "Set your Datamesh access token. It is stored in QGIS settings for "
             "this profile. If left blank, the DATAMESH_TOKEN environment "
-            "variable is used."
+            "variable is used.<br><br>"
+            f'Get your token at <a href="{TOKEN_URL}">{TOKEN_URL}</a>.'
         )
+        intro.setTextFormat(Qt.TextFormat.RichText)
+        intro.setOpenExternalLinks(True)
         intro.setWordWrap(True)
         layout.addWidget(intro)
 

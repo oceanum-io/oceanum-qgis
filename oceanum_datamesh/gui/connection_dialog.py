@@ -247,8 +247,11 @@ class ConnectionDialog(QDialog):
                 return
             self.results_list.clear()
             for entry in result or []:
+                # Show the human name only (the id appears in the metadata pane);
+                # fall back to the id when a datasource has no name.
                 label = entry.get("name") or entry.get("id")
-                item = QListWidgetItem(f"{label}\n{entry.get('id')}")
+                item = QListWidgetItem(label)
+                item.setToolTip(entry.get("id") or "")
                 item.setData(Qt.ItemDataRole.UserRole, entry.get("id"))
                 self.results_list.addItem(item)
             if not result:
