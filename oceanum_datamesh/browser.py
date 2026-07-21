@@ -74,7 +74,7 @@ def _engine() -> DatameshEngine:
         _ENGINE = DatameshEngine(
             token=settings["token"] or None,
             service=settings["service"] or None,
-            user=settings["user"] or None,
+            user=settings.get("user") or None,
         )
     return _ENGINE
 

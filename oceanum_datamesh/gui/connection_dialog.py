@@ -5,7 +5,7 @@
 Folds the old search dock into a single flow, modelled on the Datamesh UI:
 search the catalog -> pick a datasource -> choose variables, a TimeFilter and a
 GeoFilter -> stage the query (validate + compatibility) -> save. The GeoFilter
-can be a bounding box (full extent, canvas or manual) or a feature selected on
+can be a bounding box (full extent, canvas or bbox) or a feature selected on
 the map, gated to Point / MultiPoint / single Polygon as Datamesh requires.
 """
 
@@ -21,10 +21,12 @@ from qgis.core import (
     QgsFileUtils,
     QgsGeometry,
     QgsProject,
+    QgsRectangle,
     QgsVectorLayer,
 )
-from qgis.gui import QgsMapToolExtent
-from qgis.PyQt.QtCore import QDateTime, Qt
+from qgis.gui import QgsMapTool, QgsRubberBand
+from qgis.PyQt.QtCore import QDateTime, Qt, pyqtSignal
+from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -52,6 +54,53 @@ from ..tasks import FunctionTask, push_message, run_task
 from ..utils import bbox_4326, canvas_bbox_4326, to_utc_qdatetime
 
 
+class _ExtentDrawTool(QgsMapTool):
+    """Drag-a-rectangle map tool with a high-contrast rubber band.
+
+    QGIS 4.2's stock ``QgsMapToolExtent`` draws its rubber band in a pale grey
+    (fill ~rgb(239,239,239)) that is invisible over most basemaps, and offers
+    no styling API — so this tool owns its own band using the classic
+    extent-selection colours. Emits ``extentCaptured`` with the dragged
+    rectangle on release; a bare click emits a null rectangle (cancel).
+    """
+
+    extentCaptured = pyqtSignal(QgsRectangle)  # noqa: N815 - Qt signal naming
+
+    def __init__(self, canvas):
+        super().__init__(canvas)
+        self._origin = None
+        _, polygon_type = _geometry_types()
+        self._band = QgsRubberBand(canvas, polygon_type)
+        self._band.setFillColor(QColor(254, 178, 76, 63))
+        self._band.setStrokeColor(QColor(254, 58, 29, 100))
+        self._band.setWidth(2)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def canvasPressEvent(self, event) -> None:
+        self._origin = self.toMapCoordinates(event.pos())
+
+    def canvasMoveEvent(self, event) -> None:
+        if self._origin is None or self._band is None:
+            return
+        rect = QgsRectangle(self._origin, self.toMapCoordinates(event.pos()))
+        self._band.setToGeometry(QgsGeometry.fromRect(rect), None)
+
+    def canvasReleaseEvent(self, event) -> None:
+        origin, self._origin = self._origin, None
+        if origin is None:
+            rect = QgsRectangle()
+        else:
+            rect = QgsRectangle(origin, self.toMapCoordinates(event.pos()))
+        self.extentCaptured.emit(rect)
+
+    def deactivate(self) -> None:
+        if self._band is not None:
+            self.canvas().scene().removeItem(self._band)
+            self._band = None
+        self._origin = None
+        super().deactivate()
+
+
 class ConnectionDialog(QDialog):
     """Collect the parameters of one Datamesh connection (an OceanQL query)."""
 
@@ -68,8 +117,9 @@ class ConnectionDialog(QDialog):
         self._auto_name = None  # name auto-filled from the datasource, if any
         self._result_label = None
         self._result_query = None
-        self._extent_tool = None  # live QgsMapToolExtent while drawing a bbox
+        self._extent_tool = None  # live _ExtentDrawTool while drawing a bbox
         self._prev_map_tool = None
+        self._bbox_preview = None  # rubber band outlining the drawn bbox
         self._tasks: list[FunctionTask] = []
 
         self.setWindowTitle("Edit Datamesh connection" if connection else "New Datamesh connection")
@@ -153,7 +203,7 @@ class ConnectionDialog(QDialog):
         self.area_combo = QComboBox()
         self.area_combo.addItem("Full dataset extent", "full")
         self.area_combo.addItem("Current canvas extent", "canvas")
-        self.area_combo.addItem("Manual bounding box", "manual")
+        self.area_combo.addItem("Bounding box", "bbox")
         self.area_combo.addItem("Selected feature(s) on map", "feature")
         self.area_combo.currentIndexChanged.connect(self._on_area_changed)
         area_row.addWidget(self.area_combo, 1)
@@ -181,6 +231,7 @@ class ConnectionDialog(QDialog):
             spin.setDecimals(4)
             spin.setValue(default)
             spin.valueChanged.connect(self._invalidate_stage)
+            spin.valueChanged.connect(self._update_bbox_preview)
             self.bbox_spins[key] = spin
             bbox_grid.addWidget(QLabel(label), i // 2, (i % 2) * 2)
             bbox_grid.addWidget(spin, i // 2, (i % 2) * 2 + 1)
@@ -344,7 +395,7 @@ class ConnectionDialog(QDialog):
             geo = gf.model_dump(mode="json") if hasattr(gf, "model_dump") else dict(gf)
             geom = geo.get("geom")
             if geo.get("type") == "bbox" and isinstance(geom, list) and len(geom) == 4:
-                self._select_area("manual")
+                self._select_area("bbox")
                 for key, value in zip(("xmin", "ymin", "xmax", "ymax"), geom):
                     self.bbox_spins[key].setValue(float(value))
             else:  # a feature geofilter — preserve it verbatim in its own slot
@@ -386,8 +437,9 @@ class ConnectionDialog(QDialog):
 
     def _on_area_changed(self, _index: int) -> None:
         key = self.area_combo.currentData()
-        self.bbox_widget.setVisible(key == "manual")
+        self.bbox_widget.setVisible(key == "bbox")
         self.area_hint.setVisible(False)
+        self._update_bbox_preview()
         if key == "feature":
             self._capture_feature()
         self._invalidate_stage()
@@ -409,8 +461,8 @@ class ConnectionDialog(QDialog):
         if canvas is None:
             return
         self._prev_map_tool = canvas.mapTool()
-        tool = QgsMapToolExtent(canvas)
-        tool.extentChanged.connect(self._on_bbox_drawn)
+        tool = _ExtentDrawTool(canvas)
+        tool.extentCaptured.connect(self._on_bbox_drawn)
         tool.deactivated.connect(self._end_bbox_draw)
         self._extent_tool = tool
         canvas.setMapTool(tool)
@@ -471,6 +523,55 @@ class ConnectionDialog(QDialog):
         for key, value in zip(("xmin", "ymin", "xmax", "ymax"), bbox):
             self.bbox_spins[key].setValue(float(value))
 
+    def _update_bbox_preview(self, *_args) -> None:
+        """Outline the spins' bbox on the canvas while the bbox mode is active.
+
+        Driven by the spin boxes' ``valueChanged`` (hand edits and the draw
+        tool both go through them), and by area-mode changes. The draw tool's
+        own band disappears when the tool is deactivated, so this is also what
+        confirms a drawn selection. Cleared when another area mode is chosen
+        or the dialog closes.
+        """
+        if self.area_combo.currentData() != "bbox":
+            self._clear_bbox_preview()
+            return
+        canvas = self.iface.mapCanvas() if self.iface is not None else None
+        if canvas is None:
+            return
+        rect = QgsRectangle(
+            self.bbox_spins["xmin"].value(),
+            self.bbox_spins["ymin"].value(),
+            self.bbox_spins["xmax"].value(),
+            self.bbox_spins["ymax"].value(),
+        )
+        src = QgsCoordinateReferenceSystem("EPSG:4326")
+        dst = canvas.mapSettings().destinationCrs()
+        if rect.isEmpty():
+            self._clear_bbox_preview()  # mid-edit min/max inversion
+            return
+        if dst.isValid() and dst != src:
+            try:
+                transform = QgsCoordinateTransform(src, dst, QgsProject.instance())
+                rect = transform.transformBoundingBox(rect)
+            except Exception:  # noqa: BLE001 - bbox outside the canvas CRS domain
+                self._clear_bbox_preview()
+                return
+        if self._bbox_preview is None:
+            _, polygon_type = _geometry_types()
+            self._bbox_preview = QgsRubberBand(canvas, polygon_type)
+            self._bbox_preview.setFillColor(QColor(254, 178, 76, 40))
+            self._bbox_preview.setStrokeColor(QColor(254, 58, 29, 160))
+            self._bbox_preview.setWidth(2)
+        self._bbox_preview.setToGeometry(QgsGeometry.fromRect(rect), None)
+
+    def _clear_bbox_preview(self) -> None:
+        if self._bbox_preview is None:
+            return
+        band, self._bbox_preview = self._bbox_preview, None
+        canvas = self.iface.mapCanvas() if self.iface is not None else None
+        if canvas is not None:
+            canvas.scene().removeItem(band)
+
     def _end_bbox_draw(self) -> None:
         """Restore the dialog when the draw tool is deactivated externally.
 
@@ -491,7 +592,8 @@ class ConnectionDialog(QDialog):
         self.activateWindow()
 
     def done(self, result: int) -> None:  # noqa: N802 - Qt override
-        """A draw session must not outlive the dialog (e.g. plugin teardown)."""
+        """A draw session or preview must not outlive the dialog."""
+        self._clear_bbox_preview()
         if self._extent_tool is not None:
             tool, self._extent_tool = self._extent_tool, None
             self._prev_map_tool = None
@@ -513,7 +615,7 @@ class ConnectionDialog(QDialog):
             return self._feature_geofilter
         if key == "canvas":
             return {"type": "bbox", "geom": canvas_bbox_4326(self.iface)}
-        if key == "manual":
+        if key == "bbox":
             return {
                 "type": "bbox",
                 "geom": [
