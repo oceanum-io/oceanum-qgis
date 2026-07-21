@@ -19,11 +19,42 @@ import sys
 REQUIRED_PACKAGE = "oceanum"
 
 
+def _activate_user_site() -> None:
+    """Make packages installed with ``--user`` importable in this session.
+
+    ``site.py`` adds the user site-packages directory to ``sys.path`` only at
+    interpreter startup, and only if the directory already exists at that
+    moment. When a pip run creates it, the running QGIS would not see the
+    install until a full restart — so add it now. ``addsitedir`` deduplicates
+    against ``sys.path`` and processes ``.pth`` files, so it is safe to call
+    repeatedly.
+    """
+    import importlib
+    import site
+
+    try:
+        user_site = site.getusersitepackages()
+        if os.path.isdir(user_site):
+            site.addsitedir(user_site)
+        importlib.invalidate_caches()
+    except Exception:  # noqa: BLE001 - availability checks must never raise
+        pass
+
+
 def oceanum_available() -> bool:
-    """Return True if ``oceanum`` can be imported in this interpreter."""
+    """Return True if ``oceanum`` can be imported in this interpreter.
+
+    When the package is not found, first activate the user site directory —
+    a ``pip install --user`` run since QGIS started (by the plugin's installer
+    or by hand in a terminal) may have created a directory the interpreter has
+    never scanned — then look again.
+    """
     import importlib.util
 
-    return importlib.util.find_spec("oceanum") is not None
+    if importlib.util.find_spec(REQUIRED_PACKAGE) is not None:
+        return True
+    _activate_user_site()
+    return importlib.util.find_spec(REQUIRED_PACKAGE) is not None
 
 
 def python_executable() -> str:
@@ -52,6 +83,10 @@ def install_command(break_system_packages: bool = False) -> list[str]:
 def install_oceanum(progress=None) -> tuple[bool, str]:
     """Install ``oceanum`` into the QGIS Python. Returns ``(ok, combined_output)``.
 
+    ``ok`` means the package is importable in this session after the attempt
+    (checked via ``oceanum_available``, which also activates a freshly created
+    user site directory) — not merely that pip exited 0.
+
     ``progress`` is an optional callable taking a status string.
     """
 
@@ -76,7 +111,7 @@ def install_oceanum(progress=None) -> tuple[bool, str]:
             return False, output
         output += f"\n$ {' '.join(cmd)}\n{proc.stdout}\n{proc.stderr}"
         if proc.returncode == 0:
-            return True, output
+            break
         # Only retry with --break-system-packages when that is the cause.
         if index == 0 and "externally-managed" not in (proc.stdout + proc.stderr):
             break
