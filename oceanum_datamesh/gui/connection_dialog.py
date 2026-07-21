@@ -23,6 +23,7 @@ from qgis.core import (
     QgsProject,
     QgsVectorLayer,
 )
+from qgis.gui import QgsMapToolExtent
 from qgis.PyQt.QtCore import QDateTime, Qt
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
@@ -48,7 +49,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from ..tasks import FunctionTask, push_message, run_task
-from ..utils import canvas_bbox_4326, to_utc_qdatetime
+from ..utils import bbox_4326, canvas_bbox_4326, to_utc_qdatetime
 
 
 class ConnectionDialog(QDialog):
@@ -67,6 +68,8 @@ class ConnectionDialog(QDialog):
         self._auto_name = None  # name auto-filled from the datasource, if any
         self._result_label = None
         self._result_query = None
+        self._extent_tool = None  # live QgsMapToolExtent while drawing a bbox
+        self._prev_map_tool = None
         self._tasks: list[FunctionTask] = []
 
         self.setWindowTitle("Edit Datamesh connection" if connection else "New Datamesh connection")
@@ -181,6 +184,10 @@ class ConnectionDialog(QDialog):
             self.bbox_spins[key] = spin
             bbox_grid.addWidget(QLabel(label), i // 2, (i % 2) * 2)
             bbox_grid.addWidget(spin, i // 2, (i % 2) * 2 + 1)
+        self.draw_bbox_btn = QPushButton("Draw on map…")
+        self.draw_bbox_btn.setToolTip("Drag a rectangle on the map canvas to fill the bounding box")
+        self.draw_bbox_btn.clicked.connect(self._draw_bbox_on_map)
+        bbox_grid.addWidget(self.draw_bbox_btn, 2, 0, 1, 4)
         self.bbox_widget.setVisible(False)
         filt_layout.addWidget(self.bbox_widget)
         layout.addWidget(filt_box)
@@ -298,8 +305,13 @@ class ConnectionDialog(QDialog):
             self.name_edit.setText(self._auto_name)
 
         self.var_list.clear()
+        names = summary.get("variable_names") or {}
         for var in summary.get("variables", []) or []:
-            self.var_list.addItem(QListWidgetItem(var))
+            name = names.get(var)
+            item = QListWidgetItem(f"{name} ({var})" if name else var)
+            item.setData(Qt.ItemDataRole.UserRole, var)
+            item.setToolTip(var)
+            self.var_list.addItem(item)
         self._init_time_range(summary)
         self._init_bbox(summary)
 
@@ -316,7 +328,7 @@ class ConnectionDialog(QDialog):
         if wanted:
             for i in range(self.var_list.count()):
                 item = self.var_list.item(i)
-                item.setSelected(item.text() in wanted)
+                item.setSelected(item.data(Qt.ItemDataRole.UserRole) in wanted)
 
         tf = getattr(query, "timefilter", None)
         times = list(getattr(tf, "times", None) or []) if tf else []
@@ -391,6 +403,53 @@ class ConnectionDialog(QDialog):
         self.area_hint.setText(f"Using {note} as the geofilter.")
         self.area_hint.setVisible(True)
 
+    def _draw_bbox_on_map(self) -> None:
+        """Hide the dialog and let the user drag a bbox on the map canvas."""
+        canvas = self.iface.mapCanvas() if self.iface is not None else None
+        if canvas is None:
+            return
+        self._prev_map_tool = canvas.mapTool()
+        tool = QgsMapToolExtent(canvas)
+        tool.extentChanged.connect(self._on_bbox_drawn)
+        tool.deactivated.connect(self._end_bbox_draw)
+        self._extent_tool = tool
+        canvas.setMapTool(tool)
+        self.hide()
+        push_message(
+            self.iface,
+            "Drag a rectangle on the map to set the bounding box.",
+            Qgis.Info,
+        )
+
+    def _on_bbox_drawn(self, extent) -> None:
+        if extent is None or extent.isEmpty():
+            return
+        canvas = self.iface.mapCanvas()
+        bbox = bbox_4326(extent, canvas.mapSettings().destinationCrs())
+        for key, value in zip(("xmin", "ymin", "xmax", "ymax"), bbox):
+            self.bbox_spins[key].setValue(float(value))
+        self._end_bbox_draw()
+
+    def _end_bbox_draw(self) -> None:
+        """Restore the dialog and the previous map tool after drawing.
+
+        Also reached via the tool's ``deactivated`` signal when the user
+        switches tools or presses Esc, so the dialog can never stay hidden.
+        """
+        if self._extent_tool is None:
+            return
+        tool, self._extent_tool = self._extent_tool, None
+        canvas = self.iface.mapCanvas() if self.iface is not None else None
+        if canvas is not None:
+            if self._prev_map_tool is not None:
+                canvas.setMapTool(self._prev_map_tool)
+            else:
+                canvas.unsetMapTool(tool)
+        self._prev_map_tool = None
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
     def _current_geofilter(self):
         key = self.area_combo.currentData()
         if key in ("full", None):
@@ -420,7 +479,7 @@ class ConnectionDialog(QDialog):
         if not self._datasource_id:
             return None
         spec = {"datasource": self._datasource_id}
-        variables = [item.text() for item in self.var_list.selectedItems()]
+        variables = [item.data(Qt.ItemDataRole.UserRole) for item in self.var_list.selectedItems()]
         if variables:
             spec["variables"] = variables
         if not self.all_time_cb.isChecked():

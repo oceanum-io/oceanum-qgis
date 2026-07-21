@@ -99,3 +99,74 @@ def test_dialog_builds_manual_bbox_spec():
     assert spec["datasource"] == "oceanum_wave_glob_era5"
     assert spec["geofilter"] == {"type": "bbox", "geom": [1.0, 2.0, 3.0, 4.0]}
     assert "timefilter" not in spec  # all-time selected
+
+
+def test_variable_list_shows_names_and_spec_uses_ids():
+    dialog = ConnectionDialog(get_iface(), engine=object())
+    summary = {
+        "id": "ds",
+        "name": "DS",
+        "variables": ["hs", "tp"],
+        "variable_names": {"hs": "Significant wave height"},
+    }
+    dialog._apply_datasource(summary)
+    texts = [dialog.var_list.item(i).text() for i in range(dialog.var_list.count())]
+    assert texts == ["Significant wave height (hs)", "tp"]
+    dialog.var_list.item(0).setSelected(True)
+    assert dialog._build_spec()["variables"] == ["hs"]
+
+
+def test_apply_query_reselects_variables_by_id():
+    from qgis.PyQt.QtCore import Qt
+
+    class _Query:
+        variables = ["tp"]
+        timefilter = None
+        geofilter = None
+
+    dialog = ConnectionDialog(get_iface(), engine=object())
+    summary = {
+        "id": "ds",
+        "name": "DS",
+        "variables": ["hs", "tp"],
+        "variable_names": {"hs": "Significant wave height", "tp": "Peak period"},
+    }
+    dialog._apply_datasource(summary, apply_query=_Query())
+    selected = [item.data(Qt.ItemDataRole.UserRole) for item in dialog.var_list.selectedItems()]
+    assert selected == ["tp"]
+
+
+def test_bbox_4326_transforms_web_mercator():
+    from qgis.core import QgsCoordinateReferenceSystem, QgsRectangle
+
+    from oceanum_datamesh.utils import bbox_4326
+
+    out = bbox_4326(
+        QgsRectangle(0.0, 0.0, 10018754.17, 10018754.17),
+        QgsCoordinateReferenceSystem("EPSG:3857"),
+    )
+    assert out[0] == pytest.approx(0.0, abs=1e-6)
+    assert out[2] == pytest.approx(90.0, abs=0.01)
+    assert out[3] == pytest.approx(66.51, abs=0.05)
+
+
+def test_bbox_drawn_fills_manual_spins():
+    from qgis.core import QgsRectangle
+
+    dialog = ConnectionDialog(get_iface(), engine=object())
+    dialog._apply_datasource({"id": "ds", "name": "DS", "variables": []})
+    dialog._select_area("manual")
+    dialog._on_bbox_drawn(QgsRectangle(1.0, 2.0, 3.0, 4.0))
+    values = [dialog.bbox_spins[k].value() for k in ("xmin", "ymin", "xmax", "ymax")]
+    assert values == [1.0, 2.0, 3.0, 4.0]
+    assert dialog._extent_tool is None  # no dangling tool
+
+
+def test_draw_bbox_hides_dialog_and_end_restores():
+    dialog = ConnectionDialog(get_iface(), engine=object())
+    dialog._draw_bbox_on_map()
+    assert dialog.isHidden()
+    assert dialog._extent_tool is not None
+    dialog._end_bbox_draw()
+    assert not dialog.isHidden()
+    assert dialog._extent_tool is None
