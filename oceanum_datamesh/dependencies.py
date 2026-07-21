@@ -42,6 +42,27 @@ def python_executable() -> str:
     return shutil.which("python3") or shutil.which("python") or exe or "python3"
 
 
+def _activate_user_site() -> None:
+    """Make packages just installed with ``--user`` importable in this session.
+
+    ``site.py`` adds the user site-packages directory to ``sys.path`` only at
+    interpreter startup, and only if the directory already exists at that
+    moment. When the pip run above creates it, the running QGIS would not see
+    the install until a full restart — so add it now (processing ``.pth``
+    files) and drop the import system's stale finder caches.
+    """
+    import importlib
+    import site
+
+    try:
+        user_site = site.getusersitepackages()
+        if os.path.isdir(user_site) and user_site not in sys.path:
+            site.addsitedir(user_site)
+    except Exception:  # noqa: BLE001 - never let path activation mask a good install
+        pass
+    importlib.invalidate_caches()
+
+
 def install_command(break_system_packages: bool = False) -> list[str]:
     cmd = [python_executable(), "-m", "pip", "install", "--user", REQUIRED_PACKAGE]
     if break_system_packages:
@@ -76,8 +97,10 @@ def install_oceanum(progress=None) -> tuple[bool, str]:
             return False, output
         output += f"\n$ {' '.join(cmd)}\n{proc.stdout}\n{proc.stderr}"
         if proc.returncode == 0:
+            _activate_user_site()
             return True, output
         # Only retry with --break-system-packages when that is the cause.
         if index == 0 and "externally-managed" not in (proc.stdout + proc.stderr):
             break
+    _activate_user_site()
     return oceanum_available(), output
