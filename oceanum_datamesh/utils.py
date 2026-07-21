@@ -48,11 +48,8 @@ def session_dir() -> str:
     return _SESSION_DIR
 
 
-def canvas_bbox_4326(iface) -> list[float]:
-    """Return the current map canvas extent as ``[xmin, ymin, xmax, ymax]`` in WGS84."""
-    canvas = iface.mapCanvas()
-    extent = canvas.extent()
-    src_crs = canvas.mapSettings().destinationCrs()
+def bbox_4326(extent, src_crs) -> list[float]:
+    """Return ``extent`` (a ``QgsRectangle`` in ``src_crs``) as a WGS84 bbox list."""
     dst_crs = QgsCoordinateReferenceSystem("EPSG:4326")
     if src_crs.isValid() and src_crs != dst_crs:
         transform = QgsCoordinateTransform(src_crs, dst_crs, QgsProject.instance())
@@ -63,3 +60,9 @@ def canvas_bbox_4326(iface) -> list[float]:
         extent.xMaximum(),
         extent.yMaximum(),
     ]
+
+
+def canvas_bbox_4326(iface) -> list[float]:
+    """Return the current map canvas extent as ``[xmin, ymin, xmax, ymax]`` in WGS84."""
+    canvas = iface.mapCanvas()
+    return bbox_4326(canvas.extent(), canvas.mapSettings().destinationCrs())

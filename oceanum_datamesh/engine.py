@@ -32,6 +32,24 @@ def _iso(value) -> Optional[str]:
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
+def _variable_name(attrs) -> Optional[str]:
+    """Pick a human-readable variable name from schema attributes.
+
+    Prefers the CF ``long_name`` then ``standard_name``, falling back to any
+    attribute whose key contains ``name``.
+    """
+    if not isinstance(attrs, dict):
+        return None
+    for key in ("long_name", "standard_name"):
+        value = attrs.get(key)
+        if value:
+            return str(value)
+    for key, value in attrs.items():
+        if "name" in str(key).lower() and value:
+            return str(value)
+    return None
+
+
 # Canonical Datamesh coordinate axis keys (oceanum.datamesh.datasource.Coordinates):
 # ``x`` easting, ``y`` northing, ``g`` an abstract feature geometry.
 _AXIS_X, _AXIS_Y, _AXIS_GEOM = "x", "y", "g"
@@ -319,11 +337,25 @@ class DatameshEngine:
             }
         except Exception:  # noqa: BLE001
             coordinates = {}
+        raw = None
         variables = []
+        variable_names = {}
         try:
-            variables = list(dsrc.variables)
+            raw = dsrc.variables
+            variables = list(raw) if raw is not None else []
         except Exception:  # noqa: BLE001
             variables = []
+        try:
+            # Keyed by the same objects as ``variables`` so lookups match.
+            for vid, meta in raw.items() if hasattr(raw, "items") else []:
+                attrs = (
+                    meta.get("attrs") if isinstance(meta, dict) else getattr(meta, "attrs", None)
+                )
+                name = _variable_name(attrs)
+                if name:
+                    variable_names[vid] = name
+        except Exception:  # noqa: BLE001
+            pass  # names are cosmetic — never lose the ids over them
         return {
             "id": dsrc.id,
             "name": getattr(dsrc, "name", dsrc.id),
@@ -334,6 +366,7 @@ class DatameshEngine:
             "bounds": list(dsrc.bounds) if getattr(dsrc, "bounds", None) else None,
             "coordinates": coordinates,
             "variables": variables,
+            "variable_names": variable_names,
             "driver": getattr(dsrc, "driver", None),
             "details": str(getattr(dsrc, "details", "") or "") or None,
         }

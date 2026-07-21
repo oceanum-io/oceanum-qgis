@@ -118,3 +118,51 @@ def test_summarize_datasource():
     assert summary["variables"] == ["hs", "tp"]
     assert summary["bounds"] == [0, -10, 20, 10]
     assert summary["coordinates"] == {"x": "lon", "y": "lat"}
+
+
+class _SchemaDsrc:
+    id = "ds1"
+    name = "DS 1"
+    coordinates = {}
+    bounds = None
+    variables = {
+        "hs": {"attrs": {"long_name": "Significant wave height", "units": "m"}},
+        "tp": {"attrs": {"units": "s"}},
+        "dpm": {"attrs": {"standard_name": "wave_direction"}},
+        "u10": None,
+    }
+
+
+def test_summary_extracts_variable_names_from_attrs():
+    summary = DatameshEngine._summarize_datasource(_SchemaDsrc())
+    assert summary["variables"] == ["hs", "tp", "dpm", "u10"]
+    assert summary["variable_names"] == {
+        "hs": "Significant wave height",
+        "dpm": "wave_direction",
+    }
+
+
+def test_variable_name_preference_order():
+    from oceanum_datamesh.engine import _variable_name
+
+    assert _variable_name({"long_name": "L", "standard_name": "S"}) == "L"
+    assert _variable_name({"standard_name": "S", "nice_name": "N"}) == "S"
+    assert _variable_name({"nice_name": "N"}) == "N"
+    assert _variable_name({"units": "m"}) is None
+    assert _variable_name(None) is None
+
+
+def test_variable_name_failure_keeps_ids():
+    class _BadItems(dict):  # listing works, metadata access explodes
+        def items(self):
+            raise RuntimeError("boom")
+
+    class _Dsrc:
+        id = "ds2"
+        coordinates = {}
+        bounds = None
+        variables = _BadItems({"hs": None, "tp": None})
+
+    summary = DatameshEngine._summarize_datasource(_Dsrc())
+    assert summary["variables"] == ["hs", "tp"]
+    assert summary["variable_names"] == {}
