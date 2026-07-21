@@ -186,27 +186,32 @@ def test_bbox_drawn_out_of_range_leaves_spins_untouched():
     assert after == before
 
 
-def test_bare_click_cancels_draw_and_restores_dialog():
+def test_bare_click_cancels_draw_and_restores_preview():
     from qgis.core import QgsRectangle
 
     iface = get_iface()
     _canvas_4326(iface)
     dialog = ConnectionDialog(iface, engine=object())
+    dialog._apply_datasource({"id": "ds", "name": "DS", "variables": []})
+    dialog._select_area("bbox")
+    assert dialog._bbox_preview is not None
     dialog._draw_bbox_on_map()
-    assert dialog.isHidden()
+    # The dialog must NOT hide: it is shown non-modally, and hiding a dialog
+    # inside exec() closes it — the bug this flow replaces. The old outline is
+    # cleared so it cannot shadow the new drag.
+    assert dialog._bbox_preview is None
+    assert dialog._extent_tool is not None
     dialog._on_bbox_drawn(QgsRectangle())  # null extent: click without drag
-    assert not dialog.isHidden()
     assert dialog._extent_tool is None
     assert dialog._prev_map_tool is None
+    assert dialog._bbox_preview is not None  # cancelled draw restores the outline
 
 
-def test_draw_bbox_hides_dialog_and_end_restores():
+def test_external_tool_switch_ends_draw():
     dialog = ConnectionDialog(get_iface(), engine=object())
     dialog._draw_bbox_on_map()
-    assert dialog.isHidden()
     assert dialog._extent_tool is not None
     dialog._end_bbox_draw()
-    assert not dialog.isHidden()
     assert dialog._extent_tool is None
 
 
@@ -289,3 +294,18 @@ def test_bbox_preview_follows_spins_and_clears():
     assert dialog._bbox_preview is not None
     dialog.reject()  # closing the dialog clears it
     assert dialog._bbox_preview is None
+
+
+def test_open_connection_dialog_survives_draw_and_saves_on_accept():
+    from oceanum_datamesh import browser
+
+    dialog = ConnectionDialog(get_iface(), engine=object())
+    dialog._result_label, dialog._result_query = "L", object()
+    saved = []
+    browser._open_connection_dialog(dialog, lambda label, query: saved.append(label))
+    assert dialog.isVisible()
+    dialog._draw_bbox_on_map()
+    assert dialog.isVisible()  # activating the draw must not close the dialog
+    dialog._end_bbox_draw()
+    dialog.accept()
+    assert saved == ["L"]

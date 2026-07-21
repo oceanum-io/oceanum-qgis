@@ -19,6 +19,7 @@ from qgis.core import (
     QgsDataItemProvider,
     QgsDataProvider,
 )
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QAction, QMessageBox
 
 from .dependencies import oceanum_available
@@ -159,18 +160,40 @@ def _ensure_ready(engine, parent) -> bool:
     return True
 
 
+def _open_connection_dialog(dialog, on_query) -> None:
+    """Show a connection dialog non-modally and save on accept.
+
+    Non-modal is required: the dialog stays open and usable while the user
+    draws a bbox on the canvas — ``exec()`` would both block canvas input and
+    return (i.e. close the dialog) the moment the draw flow touched dialog
+    visibility.
+    """
+
+    def on_accept() -> None:
+        label, query = dialog.result()
+        if query is not None:
+            on_query(label, query)
+
+    dialog.accepted.connect(on_accept)
+    dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+    dialog.show()
+    dialog.raise_()
+    dialog.activateWindow()
+
+
 def new_connection(parent=None) -> None:
     if not _ensure_ready(_engine(), parent) or _CONTEXT.store is None:
         return
     from .gui.connection_dialog import ConnectionDialog
 
     dialog = ConnectionDialog(_CONTEXT.iface, _engine(), parent=parent or _main_window())
-    if dialog.exec():
-        label, query = dialog.result()
-        if query is not None:
-            _CONTEXT.store.add(query, label=label)
-            _refresh_root()
-            _message(f"Saved connection '{label}'.", Qgis.Success)
+
+    def save(label, query) -> None:
+        _CONTEXT.store.add(query, label=label)
+        _refresh_root()
+        _message(f"Saved connection '{label}'.", Qgis.Success)
+
+    _open_connection_dialog(dialog, save)
 
 
 def edit_connection(connection, parent=None) -> None:
@@ -181,11 +204,12 @@ def edit_connection(connection, parent=None) -> None:
     dialog = ConnectionDialog(
         _CONTEXT.iface, _engine(), connection=connection, parent=parent or _main_window()
     )
-    if dialog.exec():
-        label, query = dialog.result()
-        if query is not None:
-            _CONTEXT.store.update(connection.id, query, label=label)
-            _refresh_root()
+
+    def save(label, query) -> None:
+        _CONTEXT.store.update(connection.id, query, label=label)
+        _refresh_root()
+
+    _open_connection_dialog(dialog, save)
 
 
 def duplicate_connection(connection) -> None:

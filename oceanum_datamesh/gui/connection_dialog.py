@@ -456,17 +456,22 @@ class ConnectionDialog(QDialog):
         self.area_hint.setVisible(True)
 
     def _draw_bbox_on_map(self) -> None:
-        """Hide the dialog and let the user drag a bbox on the map canvas."""
+        """Let the user drag a bbox on the map canvas.
+
+        The dialog is non-modal (see ``browser._open_connection_dialog``) so it
+        stays open while drawing — hiding it here would end an ``exec()`` event
+        loop, i.e. close the dialog.
+        """
         canvas = self.iface.mapCanvas() if self.iface is not None else None
         if canvas is None:
             return
+        self._clear_bbox_preview()  # the old outline would shadow the new drag
         self._prev_map_tool = canvas.mapTool()
         tool = _ExtentDrawTool(canvas)
         tool.extentCaptured.connect(self._on_bbox_drawn)
         tool.deactivated.connect(self._end_bbox_draw)
         self._extent_tool = tool
         canvas.setMapTool(tool)
-        self.hide()
         push_message(
             self.iface,
             "Drag a rectangle on the map to set the bounding box.",
@@ -496,6 +501,7 @@ class ConnectionDialog(QDialog):
                 except Exception:  # noqa: BLE001 - restoring the dialog matters more
                     pass
             self._restore_dialog()
+            self._update_bbox_preview()  # re-outline current spins (also after cancel)
 
     def _fill_bbox_from_extent(self, extent) -> None:
         crs = self.iface.mapCanvas().mapSettings().destinationCrs()
@@ -585,6 +591,7 @@ class ConnectionDialog(QDialog):
         self._extent_tool = None
         self._prev_map_tool = None
         self._restore_dialog()
+        self._update_bbox_preview()
 
     def _restore_dialog(self) -> None:
         self.show()
