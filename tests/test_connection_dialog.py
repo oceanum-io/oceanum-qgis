@@ -92,7 +92,7 @@ def test_dialog_builds_manual_bbox_spec():
     # Simulate a chosen datasource + manual bbox.
     dialog._datasource_id = "oceanum_wave_glob_era5"
     dialog.all_time_cb.setChecked(True)
-    dialog._select_area("manual")
+    dialog._select_area("bbox")
     for key, value in {"xmin": 1.0, "ymin": 2.0, "xmax": 3.0, "ymax": 4.0}.items():
         dialog.bbox_spins[key].setValue(value)
     spec = dialog._build_spec()
@@ -165,7 +165,7 @@ def test_bbox_drawn_fills_manual_spins():
     _canvas_4326(iface)
     dialog = ConnectionDialog(iface, engine=object())
     dialog._apply_datasource({"id": "ds", "name": "DS", "variables": []})
-    dialog._select_area("manual")
+    dialog._select_area("bbox")
     dialog._on_bbox_drawn(QgsRectangle(1.0, 2.0, 3.0, 4.0))
     values = [dialog.bbox_spins[k].value() for k in ("xmin", "ymin", "xmax", "ymax")]
     assert values == [1.0, 2.0, 3.0, 4.0]
@@ -217,3 +217,75 @@ def test_closing_dialog_cancels_active_draw():
     dialog.reject()
     assert dialog._extent_tool is None
     assert dialog._prev_map_tool is None
+
+
+def test_extent_draw_tool_visible_band_and_capture():
+    from qgis.core import QgsRectangle
+    from qgis.PyQt.QtCore import QEvent, QPoint, QPointF, Qt
+    from qgis.PyQt.QtGui import QMouseEvent
+    from qgis.PyQt.QtWidgets import QApplication
+
+    from oceanum_datamesh.gui.connection_dialog import _ExtentDrawTool
+
+    canvas = _canvas_4326(get_iface())
+    canvas.resize(400, 400)
+    canvas.setExtent(QgsRectangle(-10.0, -10.0, 10.0, 10.0))
+    canvas.show()
+    QApplication.processEvents()
+
+    tool = _ExtentDrawTool(canvas)
+    captured = []
+    tool.extentCaptured.connect(captured.append)
+    canvas.setMapTool(tool)
+
+    def mouse(evtype, pos, buttons):
+        event = QMouseEvent(
+            evtype,
+            QPointF(pos),
+            canvas.viewport().mapToGlobal(QPointF(pos)),
+            Qt.MouseButton.LeftButton,
+            buttons,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(canvas.viewport(), event)
+        QApplication.processEvents()
+
+    mouse(QEvent.Type.MouseButtonPress, QPoint(100, 100), Qt.MouseButton.LeftButton)
+    mouse(QEvent.Type.MouseMove, QPoint(300, 300), Qt.MouseButton.LeftButton)
+    # High-contrast band is drawn while dragging (the stock tool's grey band
+    # was invisible — the bug this tool replaces).
+    assert tool._band.numberOfVertices() >= 4
+    assert tool._band.strokeColor().alpha() > 0
+    mouse(QEvent.Type.MouseButtonRelease, QPoint(300, 300), Qt.MouseButton.NoButton)
+    assert len(captured) == 1
+    rect = captured[0]
+    assert not rect.isEmpty()
+    assert rect.xMinimum() < rect.xMaximum()
+    # Bare click emits a null rectangle (the cancel path).
+    mouse(QEvent.Type.MouseButtonPress, QPoint(50, 50), Qt.MouseButton.LeftButton)
+    mouse(QEvent.Type.MouseButtonRelease, QPoint(50, 50), Qt.MouseButton.NoButton)
+    assert len(captured) == 2
+    assert captured[1].isEmpty()
+    canvas.unsetMapTool(tool)
+    assert tool._band is None  # band removed from the scene on deactivate
+
+
+def test_bbox_preview_follows_spins_and_clears():
+    from qgis.core import QgsRectangle
+
+    iface = get_iface()
+    _canvas_4326(iface)
+    dialog = ConnectionDialog(iface, engine=object())
+    dialog._apply_datasource({"id": "ds", "name": "DS", "variables": []})
+    dialog._select_area("bbox")
+    assert dialog._bbox_preview is not None  # bbox mode outlines current spins
+    dialog.bbox_spins["xmin"].setValue(1.0)  # hand edits keep it updated
+    assert dialog._bbox_preview is not None
+    assert dialog._bbox_preview.numberOfVertices() >= 4
+    dialog._select_area("full")  # other area modes clear it
+    assert dialog._bbox_preview is None
+    dialog._select_area("bbox")
+    dialog._on_bbox_drawn(QgsRectangle(1.0, 2.0, 3.0, 4.0))  # drawing updates it too
+    assert dialog._bbox_preview is not None
+    dialog.reject()  # closing the dialog clears it
+    assert dialog._bbox_preview is None
