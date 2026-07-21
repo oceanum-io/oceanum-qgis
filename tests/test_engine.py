@@ -150,3 +150,19 @@ def test_variable_name_preference_order():
     assert _variable_name({"nice_name": "N"}) == "N"
     assert _variable_name({"units": "m"}) is None
     assert _variable_name(None) is None
+
+
+def test_variable_name_failure_keeps_ids():
+    class _BadItems(dict):  # listing works, metadata access explodes
+        def items(self):
+            raise RuntimeError("boom")
+
+    class _Dsrc:
+        id = "ds2"
+        coordinates = {}
+        bounds = None
+        variables = _BadItems({"hs": None, "tp": None})
+
+    summary = DatameshEngine._summarize_datasource(_Dsrc())
+    assert summary["variables"] == ["hs", "tp"]
+    assert summary["variable_names"] == {}

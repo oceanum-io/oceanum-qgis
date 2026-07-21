@@ -337,24 +337,25 @@ class DatameshEngine:
             }
         except Exception:  # noqa: BLE001
             coordinates = {}
+        raw = None
         variables = []
         variable_names = {}
         try:
             raw = dsrc.variables
-            variables = list(raw or [])
-            if hasattr(raw, "items"):
-                for vid, meta in raw.items():
-                    attrs = (
-                        meta.get("attrs")
-                        if isinstance(meta, dict)
-                        else getattr(meta, "attrs", None)
-                    )
-                    name = _variable_name(attrs)
-                    if name:
-                        variable_names[str(vid)] = name
+            variables = list(raw) if raw is not None else []
         except Exception:  # noqa: BLE001
             variables = []
-            variable_names = {}
+        try:
+            # Keyed by the same objects as ``variables`` so lookups match.
+            for vid, meta in raw.items() if hasattr(raw, "items") else []:
+                attrs = (
+                    meta.get("attrs") if isinstance(meta, dict) else getattr(meta, "attrs", None)
+                )
+                name = _variable_name(attrs)
+                if name:
+                    variable_names[vid] = name
+        except Exception:  # noqa: BLE001
+            pass  # names are cosmetic — never lose the ids over them
         return {
             "id": dsrc.id,
             "name": getattr(dsrc, "name", dsrc.id),

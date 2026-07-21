@@ -422,33 +422,86 @@ class ConnectionDialog(QDialog):
         )
 
     def _on_bbox_drawn(self, extent) -> None:
-        if extent is None or extent.isEmpty():
+        """Fill the spins from the drawn rectangle, then hand the canvas back.
+
+        Runs for a bare click too (a null extent), which just cancels the draw —
+        the ``finally`` guarantees the hidden modal dialog always comes back,
+        even when the CRS transform fails.
+        """
+        try:
+            if extent is not None and not extent.isEmpty():
+                self._fill_bbox_from_extent(extent)
+        finally:
+            prev, self._prev_map_tool = self._prev_map_tool, None
+            tool, self._extent_tool = self._extent_tool, None
+            canvas = self.iface.mapCanvas() if self.iface is not None else None
+            if canvas is not None and tool is not None:
+                try:
+                    if prev is not None:
+                        canvas.setMapTool(prev)
+                    else:
+                        canvas.unsetMapTool(tool)
+                except Exception:  # noqa: BLE001 - restoring the dialog matters more
+                    pass
+            self._restore_dialog()
+
+    def _fill_bbox_from_extent(self, extent) -> None:
+        crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+        bbox = None
+        if crs.isValid():
+            try:
+                bbox = bbox_4326(extent, crs)
+            except Exception:  # noqa: BLE001 - e.g. rect outside the CRS domain
+                bbox = None
+        # Reject values the lon/lat spins would silently clamp (bad canvas CRS
+        # or a degenerate transform), rather than saving a garbage bbox.
+        if bbox is None or not (
+            -360.0 <= bbox[0] <= 360.0
+            and -360.0 <= bbox[2] <= 360.0
+            and -90.0 <= bbox[1] <= 90.0
+            and -90.0 <= bbox[3] <= 90.0
+        ):
+            push_message(
+                self.iface,
+                "Could not convert the drawn rectangle to longitude/latitude — "
+                "enter the bounding box manually.",
+                Qgis.Warning,
+            )
             return
-        canvas = self.iface.mapCanvas()
-        bbox = bbox_4326(extent, canvas.mapSettings().destinationCrs())
         for key, value in zip(("xmin", "ymin", "xmax", "ymax"), bbox):
             self.bbox_spins[key].setValue(float(value))
-        self._end_bbox_draw()
 
     def _end_bbox_draw(self) -> None:
-        """Restore the dialog and the previous map tool after drawing.
+        """Restore the dialog when the draw tool is deactivated externally.
 
-        Also reached via the tool's ``deactivated`` signal when the user
-        switches tools or presses Esc, so the dialog can never stay hidden.
+        Reached via the tool's ``deactivated`` signal when the user switches
+        tools while drawing; the canvas has already installed the new tool, so
+        only the dialog state is restored (re-setting the previous tool here
+        would stomp the tool the user just picked, reentrantly).
         """
         if self._extent_tool is None:
             return
-        tool, self._extent_tool = self._extent_tool, None
-        canvas = self.iface.mapCanvas() if self.iface is not None else None
-        if canvas is not None:
-            if self._prev_map_tool is not None:
-                canvas.setMapTool(self._prev_map_tool)
-            else:
-                canvas.unsetMapTool(tool)
+        self._extent_tool = None
         self._prev_map_tool = None
+        self._restore_dialog()
+
+    def _restore_dialog(self) -> None:
         self.show()
         self.raise_()
         self.activateWindow()
+
+    def done(self, result: int) -> None:  # noqa: N802 - Qt override
+        """A draw session must not outlive the dialog (e.g. plugin teardown)."""
+        if self._extent_tool is not None:
+            tool, self._extent_tool = self._extent_tool, None
+            self._prev_map_tool = None
+            canvas = self.iface.mapCanvas() if self.iface is not None else None
+            if canvas is not None:
+                try:
+                    canvas.unsetMapTool(tool)
+                except Exception:  # noqa: BLE001 - closing must not fail
+                    pass
+        super().done(result)
 
     def _current_geofilter(self):
         key = self.area_combo.currentData()

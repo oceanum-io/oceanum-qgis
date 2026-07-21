@@ -51,7 +51,7 @@ def session_dir() -> str:
 def bbox_4326(extent, src_crs) -> list[float]:
     """Return ``extent`` (a ``QgsRectangle`` in ``src_crs``) as a WGS84 bbox list."""
     dst_crs = QgsCoordinateReferenceSystem("EPSG:4326")
-    if src_crs is not None and src_crs.isValid() and src_crs != dst_crs:
+    if src_crs.isValid() and src_crs != dst_crs:
         transform = QgsCoordinateTransform(src_crs, dst_crs, QgsProject.instance())
         extent = transform.transformBoundingBox(extent)
     return [
