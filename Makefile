@@ -40,6 +40,7 @@ undeploy:
 	rm -f "$(PLUGIN_DIR)/$(PLUGIN)"
 
 zip: clean
+	cp LICENSE README.md "$(PLUGIN)/"
 	zip -r "$(ZIP)" "$(PLUGIN)" \
 		-x '*/__pycache__/*' -x '*.pyc' -x '*/.*'
 	@echo "Built $(ZIP)"

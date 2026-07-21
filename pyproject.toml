@@ -3,7 +3,7 @@
 # dependency, `oceanum`, is installed into the QGIS Python interpreter.
 [project]
 name = "oceanum-qgis"
-version = "0.1.0"
+version = "0.1.4"
 description = "QGIS plugin to search, query, load and display Oceanum Datamesh data"
 readme = "README.md"
 requires-python = ">=3.9"

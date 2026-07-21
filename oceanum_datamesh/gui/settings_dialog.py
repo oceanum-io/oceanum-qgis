@@ -31,7 +31,6 @@ def load_connection_settings() -> dict:
     return {
         "token": _get("token", "DATAMESH_TOKEN"),
         "service": _get("service", "DATAMESH_SERVICE"),
-        "user": _get("user", "DATAMESH_USER"),
     }
 
 
@@ -63,11 +62,8 @@ class SettingsDialog(QDialog):
         self.token_edit.setPlaceholderText("Datamesh access token")
         self.service_edit = QLineEdit(settings["service"])
         self.service_edit.setPlaceholderText("https://datamesh.oceanum.io (default)")
-        self.user_edit = QLineEdit(settings["user"])
-        self.user_edit.setPlaceholderText("Optional user identifier")
         form.addRow("Token", self.token_edit)
         form.addRow("Service URL", self.service_edit)
-        form.addRow("User", self.user_edit)
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(
@@ -81,5 +77,4 @@ class SettingsDialog(QDialog):
         settings = QgsSettings()
         settings.setValue(f"{SETTINGS_GROUP}/token", self.token_edit.text().strip())
         settings.setValue(f"{SETTINGS_GROUP}/service", self.service_edit.text().strip())
-        settings.setValue(f"{SETTINGS_GROUP}/user", self.user_edit.text().strip())
         super().accept()
