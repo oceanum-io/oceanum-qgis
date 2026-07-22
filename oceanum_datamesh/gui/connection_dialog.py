@@ -58,6 +58,28 @@ from ..utils import bbox_4326, canvas_bbox_4326, to_utc_qdatetime
 logger = logging.getLogger(__name__)
 
 
+def _wrap_to_180(geom):
+    """Fold geometry parts east of longitude 180 back into the ±180 world.
+
+    Datasources on 0-360 longitude grids produce polygons whose eastern edge a
+    projected canvas CRS wraps back onto the prime meridian (proj normalises
+    lon 360 to 0), collapsing the shape to a line. Splitting at the dateline
+    and shifting the eastern part by -360 renders correctly everywhere: a
+    global 0-360 box becomes the full-world box, a 150-210 box becomes two
+    strips either side of the dateline.
+    """
+    if geom.boundingBox().xMaximum() <= 180.0:
+        return geom
+    west = geom.intersection(QgsGeometry.fromRect(QgsRectangle(-180.0, -90.0, 180.0, 90.0)))
+    east = geom.intersection(QgsGeometry.fromRect(QgsRectangle(180.0, -90.0, 540.0, 90.0)))
+    if east.isEmpty():
+        return geom
+    east.translate(-360.0, 0.0)
+    if west.isEmpty():
+        return east
+    return west.combine(east)
+
+
 class _ExtentDrawTool(QgsMapTool):
     """Drag-a-rectangle map tool with a high-contrast rubber band.
 
@@ -561,15 +583,17 @@ class ConnectionDialog(QDialog):
             self.bbox_spins["xmax"].value(),
             self.bbox_spins["ymax"].value(),
         )
-        src = QgsCoordinateReferenceSystem("EPSG:4326")
-        dst = canvas.mapSettings().destinationCrs()
         if rect.isEmpty():
             self._clear_bbox_preview()  # mid-edit min/max inversion
             return
+        # Geometry-based (not transformBoundingBox) so a dateline-split
+        # multipolygon from _wrap_to_180 survives reprojection intact.
+        geom = _wrap_to_180(QgsGeometry.fromRect(rect))
+        src = QgsCoordinateReferenceSystem("EPSG:4326")
+        dst = canvas.mapSettings().destinationCrs()
         if dst.isValid() and dst != src:
             try:
-                transform = QgsCoordinateTransform(src, dst, QgsProject.instance())
-                rect = transform.transformBoundingBox(rect)
+                geom.transform(QgsCoordinateTransform(src, dst, QgsProject.instance()))
             except Exception:  # noqa: BLE001 - bbox outside the canvas CRS domain
                 self._clear_bbox_preview()
                 return
@@ -579,7 +603,7 @@ class ConnectionDialog(QDialog):
             self._bbox_preview.setFillColor(QColor(254, 178, 76, 40))
             self._bbox_preview.setStrokeColor(QColor(254, 58, 29, 160))
             self._bbox_preview.setWidth(2)
-        self._bbox_preview.setToGeometry(QgsGeometry.fromRect(rect), None)
+        self._bbox_preview.setToGeometry(geom, None)
 
     def _clear_bbox_preview(self) -> None:
         if self._bbox_preview is None:
@@ -615,6 +639,7 @@ class ConnectionDialog(QDialog):
         if geom is None:  # point datasources / no extent information
             self._clear_datasource_extent()
             return
+        geom = _wrap_to_180(geom)
         src = QgsCoordinateReferenceSystem("EPSG:4326")
         dst = canvas.mapSettings().destinationCrs()
         if dst.isValid() and dst != src:

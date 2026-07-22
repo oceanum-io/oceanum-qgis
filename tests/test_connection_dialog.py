@@ -376,3 +376,66 @@ def test_bbox_preview_shows_for_dateline_spins():
     dialog.bbox_spins["xmax"].setValue(190.0)
     assert dialog._bbox_preview is not None
     assert dialog._bbox_preview.numberOfVertices() >= 4
+
+
+def _global_0_360_summary(lat: float = 90.0) -> dict:
+    return {
+        "id": "g360",
+        "name": "G360",
+        "variables": [],
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[0, -lat], [360, -lat], [360, lat], [0, lat], [0, -lat]]],
+        },
+    }
+
+
+def test_global_0_360_extent_shows_world_box_not_meridian_line():
+    iface = get_iface()
+    _canvas_4326(iface)
+    dialog = ConnectionDialog(iface, engine=object())
+    dialog._apply_datasource(_global_0_360_summary())
+    geom = dialog._ds_extent_band.asGeometry()
+    bbox = geom.boundingBox()
+    assert bbox.xMinimum() == pytest.approx(-180.0)
+    assert bbox.xMaximum() == pytest.approx(180.0)
+    assert geom.area() == pytest.approx(360.0 * 180.0, rel=1e-6)
+    dialog.reject()
+
+
+def test_global_0_360_extent_survives_mercator_canvas():
+    """The reported bug: on a projected canvas, proj wraps lon 360 back to 0
+    and the 0-360 box collapsed to a line on the prime meridian."""
+    from qgis.core import QgsCoordinateReferenceSystem
+
+    iface = get_iface()
+    canvas = iface.mapCanvas()
+    canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
+    dialog = ConnectionDialog(iface, engine=object())
+    dialog._apply_datasource(_global_0_360_summary(lat=80.0))
+    bbox = dialog._ds_extent_band.asGeometry().boundingBox()
+    assert bbox.width() > 3.9e7  # ~full world in metres, not a zero-width line
+    dialog.reject()
+    canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
+
+
+def test_regional_dateline_extent_splits_into_two_strips():
+    iface = get_iface()
+    _canvas_4326(iface)
+    dialog = ConnectionDialog(iface, engine=object())
+    summary = {
+        "id": "fiji",
+        "name": "Fiji",
+        "variables": [],
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[150, 0], [210, 0], [210, 10], [150, 10], [150, 0]]],
+        },
+    }
+    dialog._apply_datasource(summary)
+    geom = dialog._ds_extent_band.asGeometry()
+    assert geom.area() == pytest.approx(60.0 * 10.0, rel=1e-6)  # nothing lost in the split
+    bbox = geom.boundingBox()
+    assert bbox.xMinimum() == pytest.approx(-180.0)  # western strip
+    assert bbox.xMaximum() == pytest.approx(180.0)  # eastern strip
+    dialog.reject()
