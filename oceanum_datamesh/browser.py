@@ -80,7 +80,7 @@ def _engine() -> DatameshEngine:
     return _ENGINE
 
 
-def _message(text: str, level=Qgis.Info) -> None:
+def _message(text: str, level=Qgis.MessageLevel.Info) -> None:
     from . import tasks
 
     tasks.push_message(_CONTEXT.iface, text, level)
@@ -124,7 +124,7 @@ def install_dependency(parent=None) -> None:
     """Install the 'oceanum' package into the QGIS Python (background task)."""
     from .dependencies import install_oceanum
 
-    _message("Installing the 'oceanum' package…", Qgis.Info)
+    _message("Installing the 'oceanum' package…", Qgis.MessageLevel.Info)
 
     def work(_task):
         return install_oceanum()
@@ -134,26 +134,26 @@ def install_dependency(parent=None) -> None:
             from .tasks import log
 
             detail = str(error) if error else (result[1] if result else "")
-            log(detail, Qgis.Warning)
+            log(detail, Qgis.MessageLevel.Warning)
             _message(
                 "Could not install 'oceanum'. Install it manually: pip install oceanum "
                 "(see the Log Messages panel).",
-                Qgis.Critical,
+                Qgis.MessageLevel.Critical,
             )
             return
         _invalidate_engine()
         _refresh_root()
-        _message("Installed 'oceanum'. The Datamesh node is ready.", Qgis.Success)
+        _message("Installed 'oceanum'. The Datamesh node is ready.", Qgis.MessageLevel.Success)
 
     _run_task("Install oceanum", work, done)
 
 
 def _ensure_ready(engine, parent) -> bool:
     if not oceanum_available():
-        _message("Install the 'oceanum' Python package first.", Qgis.Warning)
+        _message("Install the 'oceanum' Python package first.", Qgis.MessageLevel.Warning)
         return False
     if not engine.has_token:
-        _message("Set a Datamesh token to continue.", Qgis.Info)
+        _message("Set a Datamesh token to continue.", Qgis.MessageLevel.Info)
         if open_settings(parent):
             return _engine().has_token
         return False
@@ -191,7 +191,7 @@ def new_connection(parent=None) -> None:
     def save(label, query) -> None:
         _CONTEXT.store.add(query, label=label)
         _refresh_root()
-        _message(f"Saved connection '{label}'.", Qgis.Success)
+        _message(f"Saved connection '{label}'.", Qgis.MessageLevel.Success)
 
     _open_connection_dialog(dialog, save)
 
@@ -220,7 +220,9 @@ def duplicate_connection(connection) -> None:
     try:
         query.id = None  # force a fresh id on add
     except Exception:  # noqa: BLE001
-        pass
+        from .tasks import log
+
+        log("Copied query keeps its original id (model forbids clearing it)")
     label = f"{connection_label(connection)} (copy)"
     _CONTEXT.store.add(query, label=label)
     _refresh_root()
@@ -258,14 +260,16 @@ def load_connection(connection) -> None:
     """Run a saved connection's query and add the resulting layer(s) to the map."""
     engine = _engine()
     if not oceanum_available():
-        _message("Install the 'oceanum' Python package first.", Qgis.Warning)
+        _message("Install the 'oceanum' Python package first.", Qgis.MessageLevel.Warning)
         return
     if not engine.has_token:
-        _message("Set a Datamesh token (right-click → Datamesh settings…).", Qgis.Warning)
+        _message(
+            "Set a Datamesh token (right-click → Datamesh settings…).", Qgis.MessageLevel.Warning
+        )
         return
     name = connection_label(connection)
     variables = list(getattr(connection.query, "variables", None) or [])
-    _message(f"Loading '{name}' from Datamesh…", Qgis.Info)
+    _message(f"Loading '{name}' from Datamesh…", Qgis.MessageLevel.Info)
 
     def work(_task):
         from . import layers
@@ -282,15 +286,15 @@ def load_connection(connection) -> None:
         from . import layers
 
         if not ok:
-            _message(f"{name}: {error}", Qgis.Warning)
+            _message(f"{name}: {error}", Qgis.MessageLevel.Warning)
             return
         added, failed = layers.add_layer_specs(result or [])
         if added:
-            _message(f"Loaded {added} layer(s) from '{name}'.", Qgis.Success)
+            _message(f"Loaded {added} layer(s) from '{name}'.", Qgis.MessageLevel.Success)
         for failed_name in failed:
-            _message(f"Could not load layer: {failed_name}", Qgis.Warning)
+            _message(f"Could not load layer: {failed_name}", Qgis.MessageLevel.Warning)
         if not added and not failed:
-            _message(f"'{name}' returned no layers.", Qgis.Warning)
+            _message(f"'{name}' returned no layers.", Qgis.MessageLevel.Warning)
 
     _run_task(f"Load {name}", work, done)
 

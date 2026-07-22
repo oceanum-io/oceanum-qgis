@@ -16,11 +16,11 @@ from qgis.core import Qgis, QgsApplication, QgsMessageLog, QgsTask
 LOG_TAG = "Oceanum Datamesh"
 
 
-def log(message: str, level=Qgis.Info) -> None:
+def log(message: str, level=Qgis.MessageLevel.Info) -> None:
     QgsMessageLog.logMessage(str(message), LOG_TAG, level)
 
 
-def push_message(iface, text: str, level=Qgis.Info) -> None:
+def push_message(iface, text: str, level=Qgis.MessageLevel.Info) -> None:
     """Show a message in the QGIS message bar under the plugin's tag."""
     if iface is not None:
         iface.messageBar().pushMessage(LOG_TAG, text, level=level)
@@ -60,7 +60,7 @@ class FunctionTask(QgsTask):
         run_fn: Callable,
         on_complete: Callable,
     ):
-        super().__init__(description, QgsTask.CanCancel)
+        super().__init__(description, QgsTask.Flag.CanCancel)
         self._run_fn = run_fn
         self._on_complete = on_complete
         self.result = None
@@ -72,7 +72,7 @@ class FunctionTask(QgsTask):
             return True
         except Exception as exc:  # noqa: BLE001 - reported to the GUI
             self.error = exc
-            log(f"{self.description()} failed: {exc}", Qgis.Warning)
+            log(f"{self.description()} failed: {exc}", Qgis.MessageLevel.Warning)
             return False
 
     def finished(self, ok: bool) -> None:  # main thread

@@ -151,7 +151,10 @@ def _shader_enums():
             Qgis.ShaderClassificationMethod.Continuous,
         )
     except AttributeError:  # pragma: no cover - only on QGIS < 3.38
-        return (QgsColorRampShader.Interpolated, QgsColorRampShader.Continuous)
+        return (
+            QgsColorRampShader.Type.Interpolated,
+            QgsColorRampShader.ClassificationMode.Continuous,
+        )
 
 
 def _default_ramp():

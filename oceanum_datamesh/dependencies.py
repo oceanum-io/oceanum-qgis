@@ -10,10 +10,15 @@ on distributions that mark the environment as externally managed (PEP 668).
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
-import subprocess
+
+# subprocess runs only a fixed pip command; see install_oceanum.
+import subprocess  # nosec B404
 import sys
+
+logger = logging.getLogger(__name__)
 
 #: The package the plugin imports at runtime.
 REQUIRED_PACKAGE = "oceanum"
@@ -38,7 +43,7 @@ def _activate_user_site() -> None:
             site.addsitedir(user_site)
         importlib.invalidate_caches()
     except Exception:  # noqa: BLE001 - availability checks must never raise
-        pass
+        logger.debug("User site activation failed", exc_info=True)
 
 
 def oceanum_available() -> bool:
@@ -99,7 +104,10 @@ def install_oceanum(progress=None) -> tuple[bool, str]:
     for index, cmd in enumerate(attempts):
         _emit(f"Running: {' '.join(cmd)}")
         try:
-            proc = subprocess.run(
+            # cmd is a fixed argument list from install_command(): the QGIS
+            # interpreter path plus constant pip flags and the constant package
+            # name. No user input, shell=False — not injectable.
+            proc = subprocess.run(  # nosec B603
                 cmd,
                 capture_output=True,
                 text=True,

@@ -18,7 +18,8 @@ from qgis.PyQt.QtWidgets import (
 )
 
 SETTINGS_GROUP = "oceanum_datamesh"
-TOKEN_URL = "https://dashboard.oceanum.io/settings"
+# Not a credential: the dashboard page where users obtain their token.
+TOKEN_URL = "https://dashboard.oceanum.io/settings"  # nosec B105
 
 
 def _get(key: str, env: str, default: str = "") -> str:

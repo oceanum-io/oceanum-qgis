@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 
 from qgis.core import (
     Qgis,
@@ -52,6 +53,8 @@ from qgis.PyQt.QtWidgets import (
 
 from ..tasks import FunctionTask, push_message, run_task
 from ..utils import bbox_4326, canvas_bbox_4326, to_utc_qdatetime
+
+logger = logging.getLogger(__name__)
 
 
 class _ExtentDrawTool(QgsMapTool):
@@ -475,7 +478,7 @@ class ConnectionDialog(QDialog):
         push_message(
             self.iface,
             "Drag a rectangle on the map to set the bounding box.",
-            Qgis.Info,
+            Qgis.MessageLevel.Info,
         )
 
     def _on_bbox_drawn(self, extent) -> None:
@@ -499,7 +502,7 @@ class ConnectionDialog(QDialog):
                     else:
                         canvas.unsetMapTool(tool)
                 except Exception:  # noqa: BLE001 - restoring the dialog matters more
-                    pass
+                    logger.debug("Map tool restore failed", exc_info=True)
             self._restore_dialog()
             self._update_bbox_preview()  # re-outline current spins (also after cancel)
 
@@ -523,7 +526,7 @@ class ConnectionDialog(QDialog):
                 self.iface,
                 "Could not convert the drawn rectangle to longitude/latitude — "
                 "enter the bounding box manually.",
-                Qgis.Warning,
+                Qgis.MessageLevel.Warning,
             )
             return
         for key, value in zip(("xmin", "ymin", "xmax", "ymax"), bbox):
@@ -609,7 +612,7 @@ class ConnectionDialog(QDialog):
                 try:
                     canvas.unsetMapTool(tool)
                 except Exception:  # noqa: BLE001 - closing must not fail
-                    pass
+                    logger.debug("Map tool cleanup on close failed", exc_info=True)
         super().done(result)
 
     def _current_geofilter(self):
@@ -739,7 +742,7 @@ class ConnectionDialog(QDialog):
         self.progress.setVisible(False)
 
     def _warn(self, text: str) -> None:
-        push_message(self.iface, text, Qgis.Warning)
+        push_message(self.iface, text, Qgis.MessageLevel.Warning)
 
 
 # --------------------------------------------------------------------------- #
@@ -810,7 +813,7 @@ def _geometry_types():
     except AttributeError:  # pragma: no cover - only on QGIS < 3.30
         from qgis.core import QgsWkbTypes
 
-        return QgsWkbTypes.PointGeometry, QgsWkbTypes.PolygonGeometry
+        return QgsWkbTypes.GeometryType.PointGeometry, QgsWkbTypes.GeometryType.PolygonGeometry
 
 
 def _verdict_text(stage, compatible: bool, reason: str) -> str:

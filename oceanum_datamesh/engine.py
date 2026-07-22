@@ -9,8 +9,11 @@ prompt for installation when the dependency is missing.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class DatameshError(Exception):
@@ -222,7 +225,7 @@ class DatameshEngine:
             try:
                 session.close()
             except Exception:  # noqa: BLE001
-                pass
+                logger.debug("Datamesh session close failed", exc_info=True)
 
     def stage_compatibility(self, spec) -> tuple:
         """Stage a query and report ``(stage, compatible, reason)``.
@@ -354,8 +357,8 @@ class DatameshEngine:
                 name = _variable_name(attrs)
                 if name:
                     variable_names[vid] = name
-        except Exception:  # noqa: BLE001
-            pass  # names are cosmetic — never lose the ids over them
+        except Exception:  # noqa: BLE001 - names are cosmetic; never lose the ids over them
+            logger.debug("Variable display-name extraction failed", exc_info=True)
         return {
             "id": dsrc.id,
             "name": getattr(dsrc, "name", dsrc.id),
