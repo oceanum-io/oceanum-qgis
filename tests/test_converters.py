@@ -127,3 +127,50 @@ def test_dataframe_without_geometry_to_table(tmp_path):
 def test_result_to_layers_rejects_unknown_type(tmp_path):
     with pytest.raises(TypeError):
         converters.result_to_layers(object(), str(tmp_path), "x")
+
+
+def test_dateline_crossing_raster_gets_cropped_companion(tmp_path):
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("osgeo.gdal")
+    from osgeo import gdal
+
+    ds = xr.Dataset(
+        {"hs": (("latitude", "longitude"), np.ones((3, 21), dtype="float32"))},
+        coords={
+            "latitude": np.linspace(0, 2, 3),
+            "longitude": np.arange(170.0, 190.5, 1.0),  # crosses the dateline
+        },
+    )
+    specs = converters.dataset_to_rasters(ds, str(tmp_path))
+    assert len(specs) == 2
+    assert specs[0].path.endswith(".tif")
+    assert specs[1].path.endswith("_w360.vrt")
+    vrt = gdal.Open(specs[1].path)
+    gt = vrt.GetGeoTransform()
+    # Cropped to the beyond-dateline columns, located one world west: the
+    # first pixel edge at or east of lon 180 is 180.5, shifted to -179.5.
+    assert gt[0] == pytest.approx(-179.5)
+    assert vrt.RasterXSize == 10
+    assert vrt.ReadAsArray() is not None
+
+
+def test_temporal_dateline_companions_share_group_and_range(grid_dataset, tmp_path):
+    ds = grid_dataset.assign_coords(longitude=np.linspace(176, 184, 5))
+    specs = converters.dataset_to_rasters(ds, str(tmp_path))
+    tifs = [s for s in specs if s.path.endswith(".tif")]
+    vrts = [s for s in specs if s.path.endswith(".vrt")]
+    assert len(tifs) == 2 and len(vrts) == 2  # one companion per time step
+    for tif, vrt in zip(tifs, vrts):
+        assert vrt.group == tif.group
+        assert vrt.time_range == tif.time_range
+        assert vrt.value_range == tif.value_range
+
+
+def test_non_crossing_raster_has_no_companion(tmp_path):
+    xr = pytest.importorskip("xarray")
+    ds = xr.Dataset(
+        {"hs": (("latitude", "longitude"), np.ones((3, 5), dtype="float32"))},
+        coords={"latitude": np.linspace(0, 2, 3), "longitude": np.linspace(150, 158, 5)},
+    )
+    specs = converters.dataset_to_rasters(ds, str(tmp_path))
+    assert len(specs) == 1

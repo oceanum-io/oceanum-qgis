@@ -116,6 +116,37 @@ def _geotransform(x: np.ndarray, y: np.ndarray):
     return gt, ascending
 
 
+def _dateline_companion(gdal, path: str, x: np.ndarray, gt) -> Optional[str]:
+    """Write a VRT exposing a raster's beyond-dateline part one world west.
+
+    QGIS clips rasters at the CRS domain when reprojecting to a projected
+    canvas (e.g. web mercator with a basemap), so pixels east of lon 180
+    silently vanish. This VRT crops exactly those columns and locates them at
+    their true geography west of the dateline, where every canvas CRS renders
+    them (the crop matters: a shifted copy of the *whole* raster would itself
+    stick out of the CRS domain and degrade reprojection near the seam). The
+    native file keeps its 0-360 position for geographic canvases.
+    """
+    if x.size == 0 or float(np.max(x)) <= 180.0:
+        return None
+    x_left, dx = float(gt[0]), float(gt[1])
+    src = gdal.Open(path)
+    ncols, nrows = src.RasterXSize, src.RasterYSize
+    del src
+    # First pixel column at or east of the dateline (pixel-aligned crop).
+    k0 = max(0, int(np.ceil((180.0 - x_left) / dx - 1e-9)))
+    if k0 >= ncols:
+        return None
+    root = path[: -len(".tif")] if path.endswith(".tif") else path
+    vrt_path = root + "_w360.vrt"
+    vrt = gdal.Translate(vrt_path, path, format="VRT", srcWin=[k0, 0, ncols - k0, nrows])
+    east_left = x_left + k0 * dx
+    vrt.SetGeoTransform((east_left - 360.0, gt[1], gt[2], gt[3], gt[4], gt[5]))
+    vrt.FlushCache()
+    del vrt  # close to serialise the shifted geotransform into the .vrt
+    return vrt_path
+
+
 def dataset_to_rasters(
     ds,
     out_dir: str,
@@ -185,6 +216,9 @@ def dataset_to_rasters(
             path = os.path.join(out_dir, safe_name(f"{name_prefix}{var}") + ".tif")
             _write_geotiff(gdal, path, da, (xdim, ydim), gt, proj_wkt, flip_y, max_bands)
             specs.append(LayerSpec("raster", path, display))
+            companion = _dateline_companion(gdal, path, x, gt)
+            if companion:
+                specs.append(LayerSpec("raster", companion, f"{display} (−360°)"))
             continue
 
         # Temporal field: one single-file raster per time step, grouped per
@@ -218,6 +252,18 @@ def dataset_to_rasters(
                     value_range=value_range,
                 )
             )
+            companion = _dateline_companion(gdal, path, x, gt)
+            if companion:
+                specs.append(
+                    LayerSpec(
+                        "raster",
+                        companion,
+                        f"{begin} (−360°)",
+                        time_range=(begin, end),
+                        group=display,
+                        value_range=value_range,
+                    )
+                )
     if not specs:
         raise ValueError("No griddable variables found in the dataset.")
     return specs
