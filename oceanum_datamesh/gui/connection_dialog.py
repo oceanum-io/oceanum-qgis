@@ -22,6 +22,7 @@ from qgis.core import (
     QgsFileUtils,
     QgsGeometry,
     QgsJsonUtils,
+    QgsPointXY,
     QgsProject,
     QgsRectangle,
     QgsVectorLayer,
@@ -58,26 +59,45 @@ from ..utils import bbox_4326, canvas_bbox_4326, to_utc_qdatetime
 logger = logging.getLogger(__name__)
 
 
-def _wrap_to_180(geom):
-    """Fold geometry parts east of longitude 180 back into the ±180 world.
+def _geom_to_canvas_crs(geom, canvas):
+    """Transform a lon/lat geometry to the canvas CRS, keeping 0-360
+    longitudes in their native position east of the dateline.
 
-    Datasources on 0-360 longitude grids produce polygons whose eastern edge a
-    projected canvas CRS wraps back onto the prime meridian (proj normalises
-    lon 360 to 0), collapsing the shape to a line. Splitting at the dateline
-    and shifting the eastern part by -360 renders correctly everywhere: a
-    global 0-360 box becomes the full-world box, a 150-210 box becomes two
-    strips either side of the dateline.
+    On a geographic canvas the geometry draws as-is, matching where 0-360
+    datasets themselves display. Projected CRSes normalise lon > 180 back
+    into ±180 (collapsing a 0-360 box onto the prime meridian), so parts
+    east of 180 are transformed shifted by -360 and then translated one
+    world-width east — still east of the dateline, never relocated to the
+    western hemisphere. Returns None when the transform fails.
     """
-    if geom.boundingBox().xMaximum() <= 180.0:
+    src = QgsCoordinateReferenceSystem("EPSG:4326")
+    dst = canvas.mapSettings().destinationCrs()
+    if not dst.isValid() or dst == src:
         return geom
-    west = geom.intersection(QgsGeometry.fromRect(QgsRectangle(-180.0, -90.0, 180.0, 90.0)))
-    east = geom.intersection(QgsGeometry.fromRect(QgsRectangle(180.0, -90.0, 540.0, 90.0)))
-    if east.isEmpty():
-        return geom
-    east.translate(-360.0, 0.0)
-    if west.isEmpty():
-        return east
-    return west.combine(east)
+    transform = QgsCoordinateTransform(src, dst, QgsProject.instance())
+    try:
+        if geom.boundingBox().xMaximum() <= 180.0:
+            geom.transform(transform)
+            return geom
+        west = geom.intersection(QgsGeometry.fromRect(QgsRectangle(-180.0, -90.0, 180.0, 90.0)))
+        east = geom.intersection(QgsGeometry.fromRect(QgsRectangle(180.0, -90.0, 540.0, 90.0)))
+        east.translate(-360.0, 0.0)
+        world_width = (
+            transform.transform(QgsPointXY(180.0, 0.0)).x()
+            - transform.transform(QgsPointXY(-180.0, 0.0)).x()
+        )
+        result = None
+        if not west.isEmpty():
+            west.transform(transform)
+            result = west
+        if not east.isEmpty():
+            east.transform(transform)
+            east.translate(world_width, 0.0)
+            result = east if result is None else result.combine(east)
+        return result
+    except Exception:  # noqa: BLE001 - geometry outside the CRS domain
+        logger.debug("Extent transform to canvas CRS failed", exc_info=True)
+        return None
 
 
 class _ExtentDrawTool(QgsMapTool):
@@ -586,17 +606,10 @@ class ConnectionDialog(QDialog):
         if rect.isEmpty():
             self._clear_bbox_preview()  # mid-edit min/max inversion
             return
-        # Geometry-based (not transformBoundingBox) so a dateline-split
-        # multipolygon from _wrap_to_180 survives reprojection intact.
-        geom = _wrap_to_180(QgsGeometry.fromRect(rect))
-        src = QgsCoordinateReferenceSystem("EPSG:4326")
-        dst = canvas.mapSettings().destinationCrs()
-        if dst.isValid() and dst != src:
-            try:
-                geom.transform(QgsCoordinateTransform(src, dst, QgsProject.instance()))
-            except Exception:  # noqa: BLE001 - bbox outside the canvas CRS domain
-                self._clear_bbox_preview()
-                return
+        geom = _geom_to_canvas_crs(QgsGeometry.fromRect(rect), canvas)
+        if geom is None or geom.isEmpty():
+            self._clear_bbox_preview()
+            return
         if self._bbox_preview is None:
             _, polygon_type = _geometry_types()
             self._bbox_preview = QgsRubberBand(canvas, polygon_type)
@@ -639,15 +652,10 @@ class ConnectionDialog(QDialog):
         if geom is None:  # point datasources / no extent information
             self._clear_datasource_extent()
             return
-        geom = _wrap_to_180(geom)
-        src = QgsCoordinateReferenceSystem("EPSG:4326")
-        dst = canvas.mapSettings().destinationCrs()
-        if dst.isValid() and dst != src:
-            try:
-                geom.transform(QgsCoordinateTransform(src, dst, QgsProject.instance()))
-            except Exception:  # noqa: BLE001 - extent outside the canvas CRS domain
-                self._clear_datasource_extent()
-                return
+        geom = _geom_to_canvas_crs(geom, canvas)
+        if geom is None or geom.isEmpty():
+            self._clear_datasource_extent()
+            return
         if self._ds_extent_band is None:
             _, polygon_type = _geometry_types()
             self._ds_extent_band = QgsRubberBand(canvas, polygon_type)

@@ -390,22 +390,25 @@ def _global_0_360_summary(lat: float = 90.0) -> dict:
     }
 
 
-def test_global_0_360_extent_shows_world_box_not_meridian_line():
+def test_global_0_360_extent_stays_native_on_geographic_canvas():
+    """A 0-360 geometry displays at 0-360 — where the data itself renders —
+    never relocated to ±180."""
     iface = get_iface()
     _canvas_4326(iface)
     dialog = ConnectionDialog(iface, engine=object())
     dialog._apply_datasource(_global_0_360_summary())
     geom = dialog._ds_extent_band.asGeometry()
     bbox = geom.boundingBox()
-    assert bbox.xMinimum() == pytest.approx(-180.0)
-    assert bbox.xMaximum() == pytest.approx(180.0)
+    assert bbox.xMinimum() == pytest.approx(0.0)
+    assert bbox.xMaximum() == pytest.approx(360.0)
     assert geom.area() == pytest.approx(360.0 * 180.0, rel=1e-6)
     dialog.reject()
 
 
 def test_global_0_360_extent_survives_mercator_canvas():
     """The reported bug: on a projected canvas, proj wraps lon 360 back to 0
-    and the 0-360 box collapsed to a line on the prime meridian."""
+    and the 0-360 box collapsed to a line on the prime meridian. It must stay
+    a full-world-wide box starting at the meridian and extending east."""
     from qgis.core import QgsCoordinateReferenceSystem
 
     iface = get_iface()
@@ -415,11 +418,12 @@ def test_global_0_360_extent_survives_mercator_canvas():
     dialog._apply_datasource(_global_0_360_summary(lat=80.0))
     bbox = dialog._ds_extent_band.asGeometry().boundingBox()
     assert bbox.width() > 3.9e7  # ~full world in metres, not a zero-width line
+    assert bbox.xMinimum() > -1e5  # starts at the prime meridian, extends east
     dialog.reject()
     canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
 
 
-def test_regional_dateline_extent_splits_into_two_strips():
+def test_regional_dateline_extent_stays_native():
     iface = get_iface()
     _canvas_4326(iface)
     dialog = ConnectionDialog(iface, engine=object())
@@ -434,8 +438,8 @@ def test_regional_dateline_extent_splits_into_two_strips():
     }
     dialog._apply_datasource(summary)
     geom = dialog._ds_extent_band.asGeometry()
-    assert geom.area() == pytest.approx(60.0 * 10.0, rel=1e-6)  # nothing lost in the split
     bbox = geom.boundingBox()
-    assert bbox.xMinimum() == pytest.approx(-180.0)  # western strip
-    assert bbox.xMaximum() == pytest.approx(180.0)  # eastern strip
+    assert bbox.xMinimum() == pytest.approx(150.0)
+    assert bbox.xMaximum() == pytest.approx(210.0)  # continuous, east of the dateline
+    assert geom.area() == pytest.approx(60.0 * 10.0, rel=1e-6)
     dialog.reject()
