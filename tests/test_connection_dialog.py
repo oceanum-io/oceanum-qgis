@@ -309,3 +309,70 @@ def test_open_connection_dialog_survives_draw_and_saves_on_accept():
     dialog._end_bbox_draw()
     dialog.accept()
     assert saved == ["L"]
+
+
+def test_datasource_extent_shown_in_blue_and_cleared_on_close():
+    iface = get_iface()
+    _canvas_4326(iface)
+    dialog = ConnectionDialog(iface, engine=object())
+    summary = {
+        "id": "ds",
+        "name": "DS",
+        "variables": [],
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]]],
+        },
+    }
+    dialog._apply_datasource(summary)
+    band = dialog._ds_extent_band
+    assert band is not None
+    assert band.numberOfVertices() >= 4
+    assert band.strokeColor().blue() > band.strokeColor().red()  # blue, not orange
+    # A different datasource without a geometry falls back to its bounds.
+    dialog._apply_datasource({"id": "b", "name": "B", "variables": [], "bounds": [0, 0, 5, 5]})
+    assert dialog._ds_extent_band is not None
+    dialog.reject()
+    assert dialog._ds_extent_band is None
+
+
+def test_point_datasource_shows_no_extent_band():
+    iface = get_iface()
+    _canvas_4326(iface)
+    dialog = ConnectionDialog(iface, engine=object())
+    summary = {
+        "id": "pt",
+        "name": "PT",
+        "variables": [],
+        "geometry": {"type": "Point", "coordinates": [5.0, 5.0]},
+        "bounds": [5.0, 5.0, 5.0, 5.0],
+    }
+    dialog._apply_datasource(summary)
+    assert dialog._ds_extent_band is None
+
+
+def test_drawn_dateline_crossing_reinterprets_longitudes():
+    from qgis.core import QgsRectangle
+
+    iface = get_iface()
+    _canvas_4326(iface)
+    dialog = ConnectionDialog(iface, engine=object())
+    dialog._apply_datasource({"id": "ds", "name": "DS", "variables": []})
+    dialog._select_area("bbox")
+    # The canvas normalises a dateline-crossing drag to [-170, 170]; the fill
+    # reinterprets it as 170 → 190 so 0-360 datasources can be selected.
+    dialog._on_bbox_drawn(QgsRectangle(-170.0, 2.0, 170.0, 4.0))
+    values = [dialog.bbox_spins[k].value() for k in ("xmin", "ymin", "xmax", "ymax")]
+    assert values == [170.0, 2.0, 190.0, 4.0]
+
+
+def test_bbox_preview_shows_for_dateline_spins():
+    iface = get_iface()
+    _canvas_4326(iface)
+    dialog = ConnectionDialog(iface, engine=object())
+    dialog._apply_datasource({"id": "ds", "name": "DS", "variables": []})
+    dialog._select_area("bbox")
+    dialog.bbox_spins["xmin"].setValue(170.0)
+    dialog.bbox_spins["xmax"].setValue(190.0)
+    assert dialog._bbox_preview is not None
+    assert dialog._bbox_preview.numberOfVertices() >= 4

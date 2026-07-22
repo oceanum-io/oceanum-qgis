@@ -359,6 +359,13 @@ class DatameshEngine:
                     variable_names[vid] = name
         except Exception:  # noqa: BLE001 - names are cosmetic; never lose the ids over them
             logger.debug("Variable display-name extraction failed", exc_info=True)
+        geometry = None
+        try:
+            # GeoJSON mapping of the datasource's extent geometry (shapely
+            # exposes __geo_interface__); used to outline the extent on the map.
+            geometry = getattr(getattr(dsrc, "geometry", None), "__geo_interface__", None)
+        except Exception:  # noqa: BLE001
+            logger.debug("Datasource geometry extraction failed", exc_info=True)
         return {
             "id": dsrc.id,
             "name": getattr(dsrc, "name", dsrc.id),
@@ -367,6 +374,7 @@ class DatameshEngine:
             "tstart": _iso(getattr(dsrc, "tstart", None)),
             "tend": _iso(getattr(dsrc, "tend", None)),
             "bounds": list(dsrc.bounds) if getattr(dsrc, "bounds", None) else None,
+            "geometry": geometry,
             "coordinates": coordinates,
             "variables": variables,
             "variable_names": variable_names,

@@ -166,3 +166,22 @@ def test_variable_name_failure_keeps_ids():
     summary = DatameshEngine._summarize_datasource(_Dsrc())
     assert summary["variables"] == ["hs", "tp"]
     assert summary["variable_names"] == {}
+
+
+def test_summary_includes_datasource_geometry():
+    class _Geom:
+        __geo_interface__ = {
+            "type": "Polygon",
+            "coordinates": (((0, 0), (10, 0), (10, 10), (0, 10), (0, 0)),),
+        }
+
+    class _Dsrc:
+        id = "ds3"
+        coordinates = {}
+        bounds = [0, 0, 10, 10]
+        variables = None
+        geometry = _Geom()
+
+    summary = DatameshEngine._summarize_datasource(_Dsrc())
+    assert summary["geometry"]["type"] == "Polygon"
+    assert summary["bounds"] == [0, 0, 10, 10]

@@ -21,6 +21,7 @@ from qgis.core import (
     QgsCoordinateTransform,
     QgsFileUtils,
     QgsGeometry,
+    QgsJsonUtils,
     QgsProject,
     QgsRectangle,
     QgsVectorLayer,
@@ -123,6 +124,7 @@ class ConnectionDialog(QDialog):
         self._extent_tool = None  # live _ExtentDrawTool while drawing a bbox
         self._prev_map_tool = None
         self._bbox_preview = None  # rubber band outlining the drawn bbox
+        self._ds_extent_band = None  # blue band outlining the datasource extent
         self._tasks: list[FunctionTask] = []
 
         self.setWindowTitle("Edit Datamesh connection" if connection else "New Datamesh connection")
@@ -342,6 +344,7 @@ class ConnectionDialog(QDialog):
         self._summary = summary
         self._datasource_id = summary.get("id")
         self.meta_view.setHtml(_format_metadata(summary))
+        self._show_datasource_extent(summary)
 
         # Geofilters belong to the previous datasource — clear them and drop any
         # "Saved geometry filter" entry so a stale geometry can't leak across.
@@ -529,6 +532,11 @@ class ConnectionDialog(QDialog):
                 Qgis.MessageLevel.Warning,
             )
             return
+        # A drawn box wider than half the world is a dateline crossing that the
+        # transform normalised to ±180: reinterpret e.g. [-170, 170] as
+        # [170, 190] so 0-360-longitude datasources can be selected.
+        if bbox[2] - bbox[0] > 180.0:
+            bbox = [bbox[2], bbox[1], bbox[0] + 360.0, bbox[3]]
         for key, value in zip(("xmin", "ymin", "xmax", "ymax"), bbox):
             self.bbox_spins[key].setValue(float(value))
 
@@ -581,6 +589,56 @@ class ConnectionDialog(QDialog):
         if canvas is not None:
             canvas.scene().removeItem(band)
 
+    def _show_datasource_extent(self, summary: dict) -> None:
+        """Outline the selected datasource's extent on the canvas in blue.
+
+        Uses the datasource geometry when it is a (multi)polygon, falling back
+        to the bounds rectangle. Replaced when another datasource is selected;
+        removed when the dialog closes. Blue, to stay distinct from the orange
+        bbox-selection preview.
+        """
+        canvas = self.iface.mapCanvas() if self.iface is not None else None
+        if canvas is None:
+            return
+        geom = None
+        geojson = summary.get("geometry")
+        if geojson and geojson.get("type") in ("Polygon", "MultiPolygon"):
+            geom = QgsJsonUtils.geometryFromGeoJson(json.dumps(geojson))
+            if geom.isNull():
+                geom = None
+        if geom is None:
+            bounds = summary.get("bounds")
+            if bounds and len(bounds) == 4:
+                rect = QgsRectangle(*(float(b) for b in bounds))
+                if not rect.isEmpty():
+                    geom = QgsGeometry.fromRect(rect)
+        if geom is None:  # point datasources / no extent information
+            self._clear_datasource_extent()
+            return
+        src = QgsCoordinateReferenceSystem("EPSG:4326")
+        dst = canvas.mapSettings().destinationCrs()
+        if dst.isValid() and dst != src:
+            try:
+                geom.transform(QgsCoordinateTransform(src, dst, QgsProject.instance()))
+            except Exception:  # noqa: BLE001 - extent outside the canvas CRS domain
+                self._clear_datasource_extent()
+                return
+        if self._ds_extent_band is None:
+            _, polygon_type = _geometry_types()
+            self._ds_extent_band = QgsRubberBand(canvas, polygon_type)
+            self._ds_extent_band.setFillColor(QColor(37, 99, 235, 25))
+            self._ds_extent_band.setStrokeColor(QColor(37, 99, 235, 180))
+            self._ds_extent_band.setWidth(2)
+        self._ds_extent_band.setToGeometry(geom, None)
+
+    def _clear_datasource_extent(self) -> None:
+        if self._ds_extent_band is None:
+            return
+        band, self._ds_extent_band = self._ds_extent_band, None
+        canvas = self.iface.mapCanvas() if self.iface is not None else None
+        if canvas is not None:
+            canvas.scene().removeItem(band)
+
     def _end_bbox_draw(self) -> None:
         """Restore the dialog when the draw tool is deactivated externally.
 
@@ -602,8 +660,9 @@ class ConnectionDialog(QDialog):
         self.activateWindow()
 
     def done(self, result: int) -> None:  # noqa: N802 - Qt override
-        """A draw session or preview must not outlive the dialog."""
+        """A draw session, preview or extent outline must not outlive the dialog."""
         self._clear_bbox_preview()
+        self._clear_datasource_extent()
         if self._extent_tool is not None:
             tool, self._extent_tool = self._extent_tool, None
             self._prev_map_tool = None
