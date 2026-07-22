@@ -326,7 +326,10 @@ class ConnectionDialog(QDialog):
         from ..workspace import connection_label
 
         self.name_edit.setText(connection_label(self.connection))
-        # Load the datasource metadata, then apply the saved query on top.
+        # Populate the results list via an id search (which returns just this
+        # datasource), then load its metadata and overlay the saved query.
+        self.search_edit.setText(self.connection.datasource)
+        self.run_search()
         self._load_datasource(self.connection.datasource, apply_query=self.connection.query)
 
     # ------------------------------------------------------------------ #
@@ -361,8 +364,28 @@ class ConnectionDialog(QDialog):
                 self.results_list.addItem(item)
             if not result:
                 self._warn("No datasets matched your search.")
+            self._highlight_current_datasource()
 
         self._run_task("Datamesh search", work, done)
+
+    def _highlight_current_datasource(self) -> None:
+        """Select the loaded datasource in the results list without reloading.
+
+        The edit prefill runs the id search and the metadata load concurrently,
+        so this is called from both completion paths — whichever finishes last
+        makes the selection. Signals are blocked so selecting does not trigger
+        another load (which would drop an applied saved query).
+        """
+        if not self._datasource_id:
+            return
+        for i in range(self.results_list.count()):
+            if self.results_list.item(i).data(Qt.ItemDataRole.UserRole) == self._datasource_id:
+                self.results_list.blockSignals(True)
+                try:
+                    self.results_list.setCurrentRow(i)
+                finally:
+                    self.results_list.blockSignals(False)
+                return
 
     def _on_result_selected(self, current, _previous=None) -> None:
         if current is not None:
@@ -387,6 +410,7 @@ class ConnectionDialog(QDialog):
         self._datasource_id = summary.get("id")
         self.meta_view.setHtml(_format_metadata(summary))
         self._show_datasource_extent(summary)
+        self._highlight_current_datasource()
 
         # Geofilters belong to the previous datasource — clear them and drop any
         # "Saved geometry filter" entry so a stale geometry can't leak across.

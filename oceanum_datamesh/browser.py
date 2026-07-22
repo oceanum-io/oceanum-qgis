@@ -319,8 +319,12 @@ class DatameshConnectionItem(QgsDataItem):
     """A saved Datamesh connection (one workspace query view)."""
 
     def __init__(self, parent, connection):
+        # Custom, not Layer: a Layer-type browser item gets QGIS's stock
+        # "Add Layer to Project" / "Layer Properties" menu entries, which
+        # cannot work here (there is no map-layer URI — loading runs through
+        # the plugin's own task). Our actions() menu covers everything.
         super().__init__(
-            Qgis.BrowserItemType.Layer,
+            Qgis.BrowserItemType.Custom,
             parent,
             connection_label(connection) or connection.datasource,
             f"{ROOT_PATH}{connection.id}",

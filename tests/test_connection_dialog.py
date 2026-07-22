@@ -443,3 +443,54 @@ def test_regional_dateline_extent_stays_native():
     assert bbox.xMaximum() == pytest.approx(210.0)  # continuous, east of the dateline
     assert geom.area() == pytest.approx(60.0 * 10.0, rel=1e-6)
     dialog.reject()
+
+
+def test_edit_prefill_populates_search_results_and_selects_datasource():
+    import time
+
+    from qgis.PyQt.QtCore import Qt
+    from qgis.PyQt.QtWidgets import QApplication
+
+    class _Engine:
+        def search(self, text=None, geofilter=None, limit=200):
+            return [{"id": "wave_ds", "name": "Wave hindcast"}] if text == "wave_ds" else []
+
+        def datasource_summary(self, datasource_id):
+            return {"id": datasource_id, "name": "Wave hindcast", "variables": ["hs", "tp"]}
+
+    class _Query:
+        datasource = "wave_ds"
+        variables = ["hs"]
+        timefilter = None
+        geofilter = None
+
+    class _Conn:
+        id = "c1"
+        query = _Query()
+        label = "My waves"
+        datasource = "wave_ds"
+
+    iface = get_iface()
+    _canvas_4326(iface)
+    dialog = ConnectionDialog(iface, engine=_Engine(), connection=_Conn())
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        QApplication.processEvents()
+        if (
+            dialog._datasource_id
+            and dialog.results_list.count()
+            and dialog.results_list.currentItem() is not None
+        ):
+            break
+        time.sleep(0.02)
+    assert dialog.name_edit.text() == "My waves"
+    assert dialog._datasource_id == "wave_ds"
+    assert dialog.results_list.count() == 1
+    current = dialog.results_list.currentItem()
+    assert current is not None
+    assert current.data(Qt.ItemDataRole.UserRole) == "wave_ds"
+    # The saved query's variable selection survived — highlighting the search
+    # result must not re-trigger a plain load that would drop the overlay.
+    selected = [i.data(Qt.ItemDataRole.UserRole) for i in dialog.var_list.selectedItems()]
+    assert selected == ["hs"]
+    dialog.reject()
