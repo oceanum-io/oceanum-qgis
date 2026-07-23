@@ -184,3 +184,52 @@ def test_static_raster_keeps_default_style(tmp_path):
     before = layer.renderer().type()
     layers.apply_shared_style(layer, spec)
     assert layer.renderer().type() == before  # untouched
+
+
+def test_set_group_ramp_restyles_rasters_keeping_range(tmp_path):
+    pytest.importorskip("qgis.core", reason="QGIS bindings required")
+    from qgis.testing import start_app
+
+    start_app()
+    from qgis.core import QgsLayerTree, QgsProject, QgsSingleBandPseudoColorRenderer
+
+    from oceanum_datamesh import layers
+
+    specs = converters.dataset_to_rasters(_grid(times=2), str(tmp_path))
+    root = QgsLayerTree()
+    group = root.addGroup("hs")
+    made = []
+    for spec in specs:
+        layer = layers.layer_from_spec(spec)
+        layers.apply_shared_style(layer, spec)
+        QgsProject.instance().addMapLayer(layer, False)
+        group.addLayer(layer)
+        made.append(layer)
+    before = [
+        (lyr.renderer().classificationMin(), lyr.renderer().classificationMax()) for lyr in made
+    ]
+
+    count = layers.set_group_ramp(group, "Magma")
+
+    assert count == len(made)
+    for lyr, (vmin, vmax) in zip(made, before):
+        renderer = lyr.renderer()
+        assert isinstance(renderer, QgsSingleBandPseudoColorRenderer)
+        assert renderer.classificationMin() == pytest.approx(vmin)
+        assert renderer.classificationMax() == pytest.approx(vmax)
+    for lyr in made:
+        QgsProject.instance().removeMapLayer(lyr.id())
+
+
+def test_set_group_ramp_unknown_ramp_is_a_noop(tmp_path):
+    pytest.importorskip("qgis.core", reason="QGIS bindings required")
+    from qgis.testing import start_app
+
+    start_app()
+    from qgis.core import QgsLayerTree
+
+    from oceanum_datamesh import layers
+
+    root = QgsLayerTree()
+    group = root.addGroup("empty")
+    assert layers.set_group_ramp(group, "not-a-real-ramp") == 0

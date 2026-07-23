@@ -178,6 +178,11 @@ def apply_shared_style(layer: Any, spec: Any) -> None:
     ramp = _default_ramp()
     if ramp is None:  # pragma: no cover - Viridis ships with QGIS
         return
+    _apply_pseudocolor(layer, vmin, vmax, ramp)
+
+
+def _apply_pseudocolor(layer: Any, vmin: float, vmax: float, ramp: Any) -> None:
+    """Install a single-band pseudocolour renderer over ``[vmin, vmax]``."""
     interpolation, classification = _shader_enums()
     shader_fn = QgsColorRampShader(vmin, vmax, ramp, interpolation, classification)
     shader_fn.classifyColorRamp()
@@ -187,3 +192,35 @@ def apply_shared_style(layer: Any, spec: Any) -> None:
     renderer.setClassificationMin(vmin)
     renderer.setClassificationMax(vmax)
     layer.setRenderer(renderer)
+
+
+def set_group_ramp(group: Any, ramp_name: str) -> int:
+    """Apply a named colour ramp to every raster layer under *group*.
+
+    Each layer keeps its existing classification range (the series' shared
+    min/max), so only the colours change and a temporal animation stays on
+    one scale. Returns the number of restyled layers.
+    """
+    import math
+
+    prototype = QgsStyle.defaultStyle().colorRamp(ramp_name)
+    if prototype is None:
+        return 0
+    count = 0
+    for tree_layer in group.findLayers():
+        layer = tree_layer.layer()
+        if not isinstance(layer, QgsRasterLayer):
+            continue
+        renderer = layer.renderer()
+        if hasattr(renderer, "classificationMin"):
+            vmin, vmax = renderer.classificationMin(), renderer.classificationMax()
+        else:  # not pseudocolour yet — fall back to the band statistics
+            stats = layer.dataProvider().bandStatistics(1)
+            vmin, vmax = stats.minimumValue, stats.maximumValue
+        if not (math.isfinite(vmin) and math.isfinite(vmax) and vmin < vmax):
+            continue
+        _apply_pseudocolor(layer, float(vmin), float(vmax), prototype.clone())
+        layer.triggerRepaint()
+        layer.emitStyleChanged()
+        count += 1
+    return count

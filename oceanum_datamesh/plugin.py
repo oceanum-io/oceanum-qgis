@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from qgis.core import QgsApplication
@@ -25,6 +26,7 @@ class OceanumDatameshPlugin:
         self.toolbar_action: QAction | None = None
         self.browser_provider = None
         self.store: ConnectionStore | None = None
+        self._menu_hooked = False
 
     # -- QGIS lifecycle ---------------------------------------------------- #
     def initGui(self) -> None:  # noqa: N802 (QGIS API)
@@ -49,7 +51,61 @@ class OceanumDatameshPlugin:
         # Add "Oceanum Datamesh" connections to the Browser (top-left Sources).
         self.browser_provider = browser.register(self.iface, self.store)
 
+        # Group context menu: restyle all rasters in a group at once (QGIS 4
+        # has no multi-selection Paste Style).
+        view = self.iface.layerTreeView() if hasattr(self.iface, "layerTreeView") else None
+        if view is not None and hasattr(view, "contextMenuAboutToShow"):
+            view.contextMenuAboutToShow.connect(self._extend_layer_tree_menu)
+            self._menu_hooked = True
+
+    def _extend_layer_tree_menu(self, menu) -> None:
+        from qgis.core import QgsLayerTree, QgsRasterLayer
+
+        view = self.iface.layerTreeView()
+        node = view.currentNode() if view is not None else None
+        if node is None or not QgsLayerTree.isGroup(node):
+            return
+        if not any(
+            isinstance(tree_layer.layer(), QgsRasterLayer) for tree_layer in node.findLayers()
+        ):
+            return
+        action = menu.addAction("Set colour ramp for rasters…")
+        action.triggered.connect(lambda: self._set_group_ramp(node))
+
+    def _set_group_ramp(self, group) -> None:
+        from qgis.core import Qgis, QgsStyle
+        from qgis.PyQt.QtWidgets import QInputDialog
+
+        from .layers import set_group_ramp
+        from .tasks import push_message
+
+        names = QgsStyle.defaultStyle().colorRampNames()
+        name, ok = QInputDialog.getItem(
+            self.iface.mainWindow(),
+            "Colour ramp",
+            "Apply to every raster in the group (value ranges are kept):",
+            names,
+            0,
+            False,
+        )
+        if not ok or not name:
+            return
+        count = set_group_ramp(group, name)
+        push_message(
+            self.iface,
+            f"Applied '{name}' to {count} raster layer(s).",
+            Qgis.MessageLevel.Success if count else Qgis.MessageLevel.Warning,
+        )
+
     def unload(self) -> None:
+        if self._menu_hooked:
+            try:
+                self.iface.layerTreeView().contextMenuAboutToShow.disconnect(
+                    self._extend_layer_tree_menu
+                )
+            except Exception:  # noqa: BLE001 - view may already be gone at shutdown
+                logging.getLogger(__name__).debug("Menu unhook failed", exc_info=True)
+            self._menu_hooked = False
         if self.browser_provider is not None:
             browser.unregister(self.browser_provider)
             self.browser_provider = None
