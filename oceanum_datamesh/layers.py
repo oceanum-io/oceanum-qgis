@@ -10,7 +10,7 @@ the main thread as it touches the project.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from qgis.core import (
     Qgis,
@@ -194,32 +194,56 @@ def _apply_pseudocolor(layer: Any, vmin: float, vmax: float, ramp: Any) -> None:
     layer.setRenderer(renderer)
 
 
-def set_group_ramp(group: Any, ramp_name: str) -> int:
-    """Apply a named colour ramp to every raster layer under *group*.
-
-    Each layer keeps its existing classification range (the series' shared
-    min/max), so only the colours change and a temporal animation stays on
-    one scale. Returns the number of restyled layers.
-    """
+def _layer_range(layer: Any) -> Optional[tuple]:
+    """A raster layer's current classification (min, max), or None."""
     import math
 
-    prototype = QgsStyle.defaultStyle().colorRamp(ramp_name)
+    renderer = layer.renderer()
+    if hasattr(renderer, "classificationMin"):
+        vmin, vmax = renderer.classificationMin(), renderer.classificationMax()
+    else:  # not pseudocolour yet — fall back to the band statistics
+        stats = layer.dataProvider().bandStatistics(1)
+        vmin, vmax = stats.minimumValue, stats.maximumValue
+    if not (math.isfinite(vmin) and math.isfinite(vmax) and vmin < vmax):
+        return None
+    return float(vmin), float(vmax)
+
+
+def group_rasters(group: Any) -> list:
+    """The raster layers under *group* (including subgroups)."""
+    return [
+        tree_layer.layer()
+        for tree_layer in group.findLayers()
+        if isinstance(tree_layer.layer(), QgsRasterLayer)
+    ]
+
+
+def group_range(group: Any) -> Optional[tuple]:
+    """The combined (min, max) over all raster layers under *group*."""
+    ranges = [r for r in (_layer_range(layer) for layer in group_rasters(group)) if r]
+    if not ranges:
+        return None
+    return min(r[0] for r in ranges), max(r[1] for r in ranges)
+
+
+def set_group_ramp(group: Any, ramp: Any, vmin: float = None, vmax: float = None) -> int:
+    """Apply a colour ramp to every raster layer under *group*.
+
+    *ramp* is a ``QgsColorRamp`` or the name of one in the default style.
+    With *vmin*/*vmax* given, all layers map that common range (one colour =
+    one value across the whole group); otherwise each layer keeps its own
+    classification range. Returns the number of restyled layers.
+    """
+    prototype = QgsStyle.defaultStyle().colorRamp(ramp) if isinstance(ramp, str) else ramp
     if prototype is None:
         return 0
+    override = (float(vmin), float(vmax)) if vmin is not None and vmax is not None else None
     count = 0
-    for tree_layer in group.findLayers():
-        layer = tree_layer.layer()
-        if not isinstance(layer, QgsRasterLayer):
+    for layer in group_rasters(group):
+        value_range = override or _layer_range(layer)
+        if value_range is None or value_range[0] >= value_range[1]:
             continue
-        renderer = layer.renderer()
-        if hasattr(renderer, "classificationMin"):
-            vmin, vmax = renderer.classificationMin(), renderer.classificationMax()
-        else:  # not pseudocolour yet — fall back to the band statistics
-            stats = layer.dataProvider().bandStatistics(1)
-            vmin, vmax = stats.minimumValue, stats.maximumValue
-        if not (math.isfinite(vmin) and math.isfinite(vmax) and vmin < vmax):
-            continue
-        _apply_pseudocolor(layer, float(vmin), float(vmax), prototype.clone())
+        _apply_pseudocolor(layer, value_range[0], value_range[1], prototype.clone())
         layer.triggerRepaint()
         layer.emitStyleChanged()
         count += 1

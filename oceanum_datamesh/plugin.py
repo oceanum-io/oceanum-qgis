@@ -73,27 +73,32 @@ class OceanumDatameshPlugin:
         action.triggered.connect(lambda: self._set_group_ramp(node))
 
     def _set_group_ramp(self, group) -> None:
-        from qgis.core import Qgis, QgsStyle
-        from qgis.PyQt.QtWidgets import QInputDialog
+        from qgis.core import Qgis
 
-        from .layers import set_group_ramp
+        from .gui.ramp_dialog import GroupRampDialog
+        from .layers import _default_ramp, group_range, group_rasters, set_group_ramp
         from .tasks import push_message
 
-        names = QgsStyle.defaultStyle().colorRampNames()
-        name, ok = QInputDialog.getItem(
-            self.iface.mainWindow(),
-            "Colour ramp",
-            "Apply to every raster in the group (value ranges are kept):",
-            names,
-            0,
-            False,
+        # Prefill with the group's current ramp and combined value range.
+        ramp = None
+        rasters = group_rasters(group)
+        if rasters:
+            shader = getattr(rasters[0].renderer(), "shader", lambda: None)()
+            shader_fn = shader.rasterShaderFunction() if shader is not None else None
+            source = shader_fn.sourceColorRamp() if shader_fn is not None else None
+            ramp = source.clone() if source is not None else None
+        vmin, vmax = group_range(group) or (0.0, 1.0)
+
+        dialog = GroupRampDialog(
+            ramp=ramp or _default_ramp(), vmin=vmin, vmax=vmax, parent=self.iface.mainWindow()
         )
-        if not ok or not name:
+        if not dialog.exec():
             return
-        count = set_group_ramp(group, name)
+        vmin, vmax = dialog.value_range()
+        count = set_group_ramp(group, dialog.ramp(), vmin=vmin, vmax=vmax)
         push_message(
             self.iface,
-            f"Applied '{name}' to {count} raster layer(s).",
+            f"Restyled {count} raster layer(s) over [{vmin:g}, {vmax:g}].",
             Qgis.MessageLevel.Success if count else Qgis.MessageLevel.Warning,
         )
 

@@ -233,3 +233,55 @@ def test_set_group_ramp_unknown_ramp_is_a_noop(tmp_path):
     root = QgsLayerTree()
     group = root.addGroup("empty")
     assert layers.set_group_ramp(group, "not-a-real-ramp") == 0
+
+
+def test_set_group_ramp_with_explicit_range_overrides_all(tmp_path):
+    pytest.importorskip("qgis.core", reason="QGIS bindings required")
+    from qgis.testing import start_app
+
+    start_app()
+    from qgis.core import QgsLayerTree, QgsProject
+
+    from oceanum_datamesh import layers
+
+    specs = converters.dataset_to_rasters(_grid(times=2), str(tmp_path))
+    root = QgsLayerTree()
+    group = root.addGroup("hs")
+    made = []
+    for spec in specs:
+        layer = layers.layer_from_spec(spec)
+        layers.apply_shared_style(layer, spec)
+        QgsProject.instance().addMapLayer(layer, False)
+        group.addLayer(layer)
+        made.append(layer)
+
+    assert layers.group_range(group) is not None
+    count = layers.set_group_ramp(group, "Magma", vmin=2.0, vmax=5.0)
+
+    assert count == len(made)
+    for lyr in made:
+        assert lyr.renderer().classificationMin() == pytest.approx(2.0)
+        assert lyr.renderer().classificationMax() == pytest.approx(5.0)
+    assert layers.group_range(group) == (pytest.approx(2.0), pytest.approx(5.0))
+    for lyr in made:
+        QgsProject.instance().removeMapLayer(lyr.id())
+
+
+def test_group_ramp_dialog_validates_range():
+    pytest.importorskip("qgis.core", reason="QGIS bindings required")
+    from qgis.testing import start_app
+
+    start_app()
+    from qgis.PyQt.QtWidgets import QDialogButtonBox
+
+    from oceanum_datamesh.gui.ramp_dialog import GroupRampDialog
+
+    dialog = GroupRampDialog(vmin=0.0, vmax=4.0)
+    ok = dialog.buttons.button(QDialogButtonBox.StandardButton.Ok)
+    assert ok.isEnabled()
+    assert dialog.value_range() == (0.0, 4.0)
+    dialog.min_spin.setValue(9.0)  # min above max: cannot accept
+    assert not ok.isEnabled()
+    dialog.max_spin.setValue(12.0)
+    assert ok.isEnabled()
+    assert dialog.value_range() == (9.0, 12.0)
