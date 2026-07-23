@@ -8,8 +8,8 @@ about=A QGIS plugin for the Oceanum Datamesh platform. Search the Datamesh catal
     feature datasets become vector layers, and station/table data become point or attribute-table layers.
     Requires a Datamesh access token (set the DATAMESH_TOKEN environment variable or enter it in the plugin).
     Depends on the `oceanum` Python package, which the plugin can install for you on first run.
-version=0.1.4
-author=Oceanum / Dave Johnson
+version=0.1.5
+author=Oceanum Developers
 email=d.johnson@oceanum.science
 tracker=https://github.com/oceanum-io/oceanum-qgis/issues
 repository=https://github.com/oceanum-io/oceanum-qgis
