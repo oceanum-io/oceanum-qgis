@@ -263,7 +263,21 @@ class DatameshEngine:
         ``timefilter``, ``geofilter``, ``use_dask``. Returns an
         ``xarray.Dataset``, ``geopandas.GeoDataFrame``, ``pandas.DataFrame`` or
         ``None`` (no data).
+
+        A datasource stores longitudes in one frame (0-360 or ±180); a bbox
+        crossing that frame's seam (e.g. -10..10 on a 0-360 datasource, or
+        170..190 on a ±180 one) cannot be expressed as a single bbox in
+        datasource coordinates, so it runs as two queries — one each side of
+        the seam — glued back together with longitudes in the frame the user
+        asked in.
         """
+        parts = self._split_seam_bbox(spec)
+        if parts is None:
+            return self._query_once(spec)
+        results = [(self._query_once(part), offset) for part, offset in parts]
+        return self._glue_lon_parts(results)
+
+    def _query_once(self, spec):
         conn = self.connect()
         use_dask = False
         try:
@@ -304,6 +318,103 @@ class DatameshEngine:
         if nbytes is not None and nbytes > _MAX_RESULT_BYTES:
             raise DatameshError(f"{_TOO_LARGE_MSG} (result is ~{nbytes / 1e9:.1f} GB).")
         return result
+
+    # -- seam-wrapping bboxes ---------------------------------------------- #
+    @staticmethod
+    def _bbox_of(spec):
+        """The spec's bbox geofilter as ``[x0, y0, x1, y1]``, or None."""
+        gf = spec.get("geofilter") if isinstance(spec, dict) else getattr(spec, "geofilter", None)
+        if gf is None:
+            return None
+        gtype = gf.get("type") if isinstance(gf, dict) else getattr(gf, "type", None)
+        gtype = getattr(gtype, "value", gtype)
+        geom = gf.get("geom") if isinstance(gf, dict) else getattr(gf, "geom", None)
+        if str(gtype) != "bbox" or not isinstance(geom, (list, tuple)) or len(geom) != 4:
+            return None
+        return [float(v) for v in geom]
+
+    @staticmethod
+    def _with_bbox(spec, bbox):
+        """A copy of *spec* with its geofilter replaced by *bbox*."""
+        geofilter = {"type": "bbox", "geom": [float(v) for v in bbox]}
+        if isinstance(spec, dict):
+            return {**spec, "geofilter": geofilter}
+        data = spec.model_dump(exclude_none=True)
+        data["geofilter"] = geofilter
+        return type(spec)(**data)
+
+    def _lon_frame(self, datasource_id) -> tuple:
+        """The datasource's longitude frame: ``(0, 360)`` or ``(-180, 180)``."""
+        try:
+            bounds = getattr(self.datasource(datasource_id), "bounds", None)
+            if bounds is not None and float(bounds[2]) > 180.0:
+                return 0.0, 360.0
+        except Exception:  # noqa: BLE001 - fall back to the standard frame
+            logger.debug("Longitude frame detection failed", exc_info=True)
+        return -180.0, 180.0
+
+    def _split_seam_bbox(self, spec):
+        """Split a bbox that wraps the datasource's longitude seam.
+
+        Returns ``[(spec_west_of_seam, lon_offset), (spec_east, lon_offset)]``
+        where each offset restores that part's longitudes to the frame the
+        user asked in, or ``None`` when a single query expresses the bbox.
+        """
+        bbox = self._bbox_of(spec)
+        if bbox is None:
+            return None
+        x0, y0, x1, y1 = bbox
+        if x1 - x0 >= 360.0:  # whole world — the lon constraint is moot
+            return None
+        # Only fetch the frame when the bbox could disagree with it.
+        if not (x0 < 0.0 < x1 or x1 > 180.0 or x0 < -180.0):
+            return None
+        datasource_id = spec["datasource"] if isinstance(spec, dict) else spec.datasource
+        fmin, fmax = self._lon_frame(datasource_id)
+
+        def norm(lon: float) -> float:
+            return (lon - fmin) % 360.0 + fmin
+
+        n0, n1 = norm(x0), norm(x1)
+        if n0 < n1:  # fits the frame in one piece; the server handles it
+            return None
+        return [
+            (self._with_bbox(spec, [n0, y0, fmax, y1]), x0 - n0),
+            (self._with_bbox(spec, [fmin, y0, n1, y1]), x1 - n1),
+        ]
+
+    @staticmethod
+    def _glue_lon_parts(results):
+        """Join the results of a seam-split query back along longitude."""
+        import numpy as np
+
+        parts = [(r, off) for r, off in results if r is not None]
+        if not parts:
+            return None
+        first = parts[0][0]
+        if not hasattr(first, "dims"):  # tabular / feature results: stack rows
+            import pandas as pd
+
+            return pd.concat([r for r, _ in parts]) if len(parts) > 1 else first
+        from .converters import _X_NAMES
+
+        xname = next((n for n in _X_NAMES if n in first.coords), None)
+        shifted = []
+        for r, off in parts:
+            if off and xname:
+                r = r.assign_coords({xname: r[xname] + off})
+            shifted.append(r)
+        if xname is None or len(shifted) == 1:
+            return shifted[0]
+        import xarray as xr
+
+        londim = first[xname].dims[0]
+        combined = xr.concat(shifted, dim=londim).sortby(xname)
+        lons = np.asarray(combined[xname].values)
+        _, unique_idx = np.unique(lons, return_index=True)
+        if unique_idx.size != lons.size:  # both halves included the seam column
+            combined = combined.isel({londim: np.sort(unique_idx)})
+        return combined
 
     # -- summaries --------------------------------------------------------- #
     @staticmethod
